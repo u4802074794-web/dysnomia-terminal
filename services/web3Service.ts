@@ -1,0 +1,133 @@
+import { BrowserProvider, JsonRpcProvider, Wallet, Contract, formatEther, InterfaceAbi, parseEther, TransactionResponse, TransactionReceipt, MaxUint256 } from "ethers";
+import { DEFAULT_RPC_URL, LAU_ABI } from "../constants";
+
+export class Web3Service {
+  private provider: BrowserProvider | JsonRpcProvider;
+  private signer: any; // Signer or Wallet
+
+  constructor(rpcUrl: string = DEFAULT_RPC_URL, privateKey?: string) {
+    if (privateKey) {
+      const provider = new JsonRpcProvider(rpcUrl);
+      this.signer = new Wallet(privateKey, provider);
+      this.provider = provider;
+    } else if ((window as any).ethereum) {
+      this.provider = new BrowserProvider((window as any).ethereum);
+    } else {
+      this.provider = new JsonRpcProvider(rpcUrl);
+    }
+  }
+
+  async connect(): Promise<string> {
+    if (this.signer) {
+      return await this.signer.getAddress();
+    } else {
+      await this.provider.send("eth_requestAccounts", []);
+      this.signer = await this.provider.getSigner();
+      return await this.signer.getAddress();
+    }
+  }
+
+  async getBalance(address: string): Promise<string> {
+    const balance = await this.provider.getBalance(address);
+    return formatEther(balance);
+  }
+
+  getContract(address: string, abi: InterfaceAbi) {
+    if (!this.signer) return new Contract(address, abi, this.provider);
+    return new Contract(address, abi, this.signer);
+  }
+
+  async simulateTransaction(contract: Contract, method: string, args: any[]): Promise<any> {
+    try {
+      // Static call simulates execution without mining
+      const result = await contract[method].staticCall(...args);
+      return { success: true, result };
+    } catch (error: any) {
+      return { success: false, error: this.parseError(error) };
+    }
+  }
+
+  async sendTransaction(contract: Contract, method: string, args: any[]): Promise<TransactionResponse> {
+    const tx = await contract[method](...args);
+    return tx;
+  }
+
+  /**
+   * Protocol Identity Wrapper
+   * Routes interaction through the User's LAU (Soul Shell) if available/applicable
+   * to ensure Aura/Soul accumulation on the identity node.
+   */
+  async protocolCall(
+      targetContract: Contract, 
+      method: string, 
+      args: any[], 
+      userLauAddress: string | null
+  ): Promise<TransactionResponse> {
+      
+      // IDENTITY ROUTING: CHAT
+      // If the user is trying to Chat, and has a LAU, we route it through the LAU contract
+      // so the protocol knows WHO is speaking (Identity Layer).
+      if (method === 'Chat' && userLauAddress) {
+          const lauContract = this.getContract(userLauAddress, LAU_ABI);
+          // LAU.Chat(string) automatically broadcasts to the current area of the LAU
+          return await lauContract.Chat(args[0]);
+      }
+
+      // Default: Direct Interaction
+      return await targetContract[method](...args);
+  }
+  
+  async waitForReceipt(tx: TransactionResponse): Promise<TransactionReceipt | null> {
+      return await tx.wait();
+  }
+
+  getProvider() {
+    return this.provider;
+  }
+
+  // --- ERC20 Helpers ---
+
+  async checkAllowance(tokenAddress: string, owner: string, spender: string): Promise<bigint> {
+    try {
+        const token = this.getContract(tokenAddress, ["function allowance(address,address) view returns (uint256)"]);
+        return await token.allowance(owner, spender);
+    } catch (e) {
+        console.warn("Failed to check allowance", e);
+        return 0n;
+    }
+  }
+
+  async approve(tokenAddress: string, spender: string, amount: bigint = MaxUint256): Promise<TransactionResponse> {
+    const token = this.getContract(tokenAddress, ["function approve(address,uint256) returns (bool)"]);
+    return await token.approve(spender, amount);
+  }
+
+  // --- Error Handling ---
+
+  parseError(error: any): string {
+      // 1. Try to get the Revert Reason String directly
+      if (error?.reason) return `Revert: ${error.reason}`;
+
+      // 2. Dig into data payload (common in Ethers call exceptions)
+      // FIX: Removed truncation to allow full inspection of revert data
+      const data = error?.data || error?.transaction?.data || error?.info?.error?.data;
+      if (data && typeof data === 'string' && data.length > 10) {
+          return `Revert Data: ${data}`;
+      }
+
+      // 3. Handle specific error codes
+      if (error?.code === 'CALL_EXCEPTION') {
+          return "Transaction Reverted by Contract. Possible Causes: 1) Insufficient LAU Balance 2) Invalid Address 3) Not Admitted.";
+      }
+      if (error?.code === 'ACTION_REJECTED' || error?.code === 4001) {
+          return "User Rejected Transaction.";
+      }
+
+      // 4. Return Full Message
+      if (error?.message) {
+          return error.message;
+      }
+      
+      return "Unknown Interaction Error";
+  }
+}
