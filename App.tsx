@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { formatUnits } from 'ethers';
 import { Web3Service } from './services/web3Service';
 import { AppView, LogEntry, UserContext } from './types';
-import { ADDRESSES, DEFAULT_RPC_URL } from './constants';
+import { ADDRESSES, DEFAULT_RPC_URL, GEMINI_MODELS } from './constants';
 
 // Components
 import TerminalLog from './components/TerminalLog';
@@ -28,6 +28,13 @@ const App: React.FC = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showNavAI, setShowNavAI] = useState(true);
   
+  // Settings State
+  const [aiKey, setAiKey] = useState('');
+  const [aiModel, setAiModel] = useState('gemini-2.5-flash-preview-09-2025');
+  
+  // RPC State
+  const [activeRpc, setActiveRpc] = useState<string>(DEFAULT_RPC_URL);
+
   // Telemetry
   const [blockNumber, setBlockNumber] = useState<number>(0);
   const [gasPrice, setGasPrice] = useState<string>('0');
@@ -53,31 +60,59 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const initWeb3 = async () => {
-        const _web3 = new Web3Service();
-        setWeb3(_web3);
-        addLog({
-            id: generateId(),
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'INFO',
-            message: 'TERMINAL_OS v4.1.4 // ATROPA KERNEL LOADED'
-        });
+    // Load Settings on Boot
+    const storedKey = localStorage.getItem('dys_gemini_key');
+    const storedModel = localStorage.getItem('dys_gemini_model');
+    const storedRpc = localStorage.getItem('dys_custom_rpc');
+    
+    if(storedKey) setAiKey(storedKey);
+    if(storedModel) setAiModel(storedModel);
+    
+    const rpcToUse = storedRpc || DEFAULT_RPC_URL;
+    setActiveRpc(rpcToUse);
 
-        // Initial Stats Fetch
-        try {
-            const provider = _web3.getProvider();
-            const block = await provider.getBlockNumber();
-            setBlockNumber(block);
-            const feeData = await provider.getFeeData();
-            if(feeData.gasPrice) {
-                setGasPrice(formatUnits(feeData.gasPrice, 'gwei'));
-            }
-        } catch(e) {
-            console.error("Telemetry failed", e);
-        }
-    };
-    initWeb3();
+    initWeb3(rpcToUse);
   }, []);
+
+  const initWeb3 = async (url: string) => {
+      const _web3 = new Web3Service(url);
+      setWeb3(_web3);
+      addLog({
+          id: generateId(),
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'INFO',
+          message: `TERMINAL_OS v4.1.5 // ATROPA KERNEL LOADED`
+      });
+
+      // Initial Stats Fetch
+      try {
+          const provider = _web3.getProvider();
+          const block = await provider.getBlockNumber();
+          setBlockNumber(block);
+          const feeData = await provider.getFeeData();
+          if(feeData.gasPrice) {
+              setGasPrice(formatUnits(feeData.gasPrice, 'gwei'));
+          }
+      } catch(e) {
+          console.error("Telemetry failed", e);
+          addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: 'Uplink Unstable: Check RPC Settings.' });
+      }
+  };
+
+  const saveSettings = () => {
+      localStorage.setItem('dys_gemini_key', aiKey);
+      localStorage.setItem('dys_gemini_model', aiModel);
+      localStorage.setItem('dys_custom_rpc', activeRpc);
+      
+      addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: 'Configuration Saved. Reinitializing Uplink...' });
+      
+      // Re-init Web3 with new settings
+      initWeb3(activeRpc);
+  };
+
+  const resetRpcDefaults = () => {
+      setActiveRpc(DEFAULT_RPC_URL);
+  };
 
   // Polling for block stats
   useEffect(() => {
@@ -130,6 +165,73 @@ const App: React.FC = () => {
   const renderContent = () => {
       if(!web3) return <div className="p-10 text-dys-amber animate-pulse font-mono">SYSTEM BOOT SEQUENCE...</div>;
 
+      if (view === AppView.SETTINGS) {
+          return (
+              <div className="p-8 text-dys-amber font-mono max-w-2xl mx-auto mt-10 border border-dys-amber/20 bg-dys-panel/50 overflow-y-auto max-h-[80vh]">
+                  <h2 className="text-xl mb-6 border-b border-dys-amber/30 pb-2 flex justify-between">
+                      <span>TERMINAL CONFIGURATION</span>
+                      <span>[SYS_ADMIN]</span>
+                  </h2>
+                  <div className="space-y-8">
+                      {/* RPC SETTINGS */}
+                      <div className="space-y-4">
+                          <div className="flex justify-between items-end border-b border-dys-amber/10 pb-1">
+                              <label className="text-xs uppercase font-bold text-gray-500">Active Uplink Node</label>
+                              <button onClick={resetRpcDefaults} className="text-[10px] text-dys-red hover:text-white uppercase">Reset Default</button>
+                          </div>
+                          
+                          <div className="flex gap-2 mt-2">
+                              <input 
+                                  className="flex-1 bg-black border border-dys-amber/30 p-2 text-sm text-dys-amber focus:border-dys-amber outline-none font-mono"
+                                  placeholder="https://..."
+                                  value={activeRpc}
+                                  onChange={(e) => setActiveRpc(e.target.value)}
+                              />
+                          </div>
+                      </div>
+
+                      {/* AI SETTINGS */}
+                      <div className="space-y-4 pt-4 border-t border-dys-amber/10">
+                          <div className="flex flex-col gap-2">
+                              <label className="text-xs uppercase font-bold text-dys-cyan">Gemini API Key</label>
+                              <input 
+                                  type="password"
+                                  className="bg-black border border-dys-cyan/30 p-3 text-sm text-dys-cyan focus:border-dys-cyan outline-none font-mono"
+                                  placeholder="sk-..."
+                                  value={aiKey}
+                                  onChange={(e) => setAiKey(e.target.value)}
+                              />
+                              <div className="text-[10px] text-gray-500">Required for NavAI and Oracle features. Stored locally.</div>
+                          </div>
+
+                          <div className="flex flex-col gap-2">
+                              <label className="text-xs uppercase font-bold text-dys-cyan">AI Model</label>
+                              <select 
+                                  className="bg-black border border-dys-cyan/30 p-3 text-sm text-dys-cyan focus:border-dys-cyan outline-none font-mono"
+                                  value={aiModel}
+                                  onChange={(e) => setAiModel(e.target.value)}
+                              >
+                                  {GEMINI_MODELS.map(m => (
+                                      <option key={m} value={m}>{m}</option>
+                                  ))}
+                              </select>
+                          </div>
+                      </div>
+
+                      <div className="pt-4 border-t border-dys-amber/20">
+                          <button 
+                            onClick={saveSettings}
+                            disabled={!activeRpc}
+                            className="bg-dys-amber/10 text-dys-amber border border-dys-amber hover:bg-dys-amber hover:text-black px-6 py-2 font-bold text-sm transition-all disabled:opacity-50"
+                          >
+                              SAVE & REBOOT
+                          </button>
+                      </div>
+                  </div>
+              </div>
+          );
+      }
+
       if(activeSystem !== System.DYSNOMIA) {
           return (
               <div className="flex flex-col items-center justify-center h-full text-dys-red font-mono border-2 border-dys-red/20 m-4">
@@ -166,18 +268,6 @@ const App: React.FC = () => {
               </div>;
           case AppView.CONTRACT_STUDIO:
               return <ContractStudio web3={web3} addLog={addLog} />;
-          case AppView.SETTINGS:
-              return (
-                  <div className="p-8 text-dys-amber font-mono">
-                      <h2 className="text-xl mb-4 border-b border-dys-amber/30 pb-2">TERMINAL CONFIG</h2>
-                      <div className="space-y-4 max-w-md">
-                          <div className="flex flex-col gap-1">
-                              <label className="text-xs opacity-70">UPLINK_NODE</label>
-                              <div className="bg-dys-black border border-dys-amber/50 p-2 text-sm">{DEFAULT_RPC_URL}</div>
-                          </div>
-                      </div>
-                  </div>
-              );
           default:
               return <div className="p-10 text-center font-mono text-dys-red">ERR: MODULE NOT FOUND</div>;
       }
@@ -189,7 +279,7 @@ const App: React.FC = () => {
       {/* 1. TOP STATUS BAR (HARDWARE LEVEL) */}
       <div className="h-6 bg-dys-black border-b border-dys-border flex items-center justify-center md:justify-between px-2 text-[10px] tracking-wider select-none shrink-0 opacity-60">
           <div className="flex items-center gap-4">
-              <span>KERNEL: v.4.1.4</span>
+              <span>KERNEL: v.4.1.5</span>
               <span>MEM: OK</span>
           </div>
           <div className="hidden md:flex items-center gap-4">
@@ -216,9 +306,9 @@ const App: React.FC = () => {
                 {[System.DYSNOMIA, System.ATROPA, System.BREZ].map(sys => (
                     <button
                         key={sys}
-                        onClick={() => setActiveSystem(sys)}
+                        onClick={() => { setActiveSystem(sys); setView(AppView.DASHBOARD); }}
                         className={`px-3 py-1 text-xs font-bold tracking-wider transition-all border ${
-                            activeSystem === sys 
+                            activeSystem === sys && view !== AppView.SETTINGS
                             ? 'border-dys-amber text-black bg-dys-amber' 
                             : 'border-transparent text-gray-600 hover:text-dys-amber hover:border-dys-amber/30'
                         }`}
@@ -226,6 +316,18 @@ const App: React.FC = () => {
                         {sys}
                     </button>
                 ))}
+                
+                {/* SETTINGS BUTTON */}
+                <button
+                    onClick={() => setView(AppView.SETTINGS)}
+                    className={`px-3 py-1 text-xs font-bold tracking-wider transition-all border ${
+                        view === AppView.SETTINGS
+                        ? 'border-gray-500 text-black bg-gray-500' 
+                        : 'border-transparent text-gray-600 hover:text-white hover:border-gray-500/30'
+                    }`}
+                >
+                    SETTINGS
+                </button>
             </div>
         </div>
 
@@ -270,7 +372,7 @@ const App: React.FC = () => {
       </header>
 
       {/* 3. MODULE NAVIGATION (DYSNOMIA CONTEXT) */}
-      {activeSystem === System.DYSNOMIA && (
+      {activeSystem === System.DYSNOMIA && view !== AppView.SETTINGS && (
         <div className="bg-[#0a0a0a] border-b border-dys-border py-2 px-6 flex items-center gap-2 text-xs shrink-0 overflow-x-auto">
             <span className="text-dys-cyan font-bold mr-4 tracking-widest hidden md:block">MODULE // DYSNOMIA</span>
             <span className="text-gray-800 mr-2 hidden md:block">|</span>

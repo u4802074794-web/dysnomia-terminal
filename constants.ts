@@ -25,6 +25,13 @@ Capabilities:
 3. Assist with Terraforming operations (React, Alpha, Beta).
 `;
 
+export const GEMINI_MODELS = [
+    'gemini-2.5-flash-preview-09-2025',
+    'gemini-flash-latest',
+    'gemini-3-pro-preview',
+    'gemini-flash-lite-latest'
+];
+
 // ---------------------------------------------------------------------------
 // KNOWN CONTRACTS REGISTRY
 // ---------------------------------------------------------------------------
@@ -173,12 +180,15 @@ export const QING_ABI: InterfaceAbi = [
     "function BouncerDivisor() view returns (uint16)",
     "function CoverCharge() view returns (uint256)",
     "function Join(address)",
-    "function Leave()",
-    "function Chat(address,string)", // QING Chat takes (UserToken, Message)
+    "function Leave(address)", 
+    "function Chat(address,string)", 
     "function Withdraw(address,uint256)",
     "function Admitted(address) view returns (bool)",
     "function name() view returns (string)",
     "function symbol() view returns (string)",
+    "function owner() view returns (address)",
+    "function SetAdmittance(address,bool)",
+    "function SetCoverCharge(uint256)",
     "event LogEvent(string Username, uint64 Soul, uint64 Aura, string LogLine)"
 ];
 

@@ -1,30 +1,47 @@
-import { BrowserProvider, JsonRpcProvider, Wallet, Contract, formatEther, InterfaceAbi, parseEther, TransactionResponse, TransactionReceipt, MaxUint256 } from "ethers";
+
+import { BrowserProvider, JsonRpcProvider, Wallet, Contract, formatEther, InterfaceAbi, parseEther, TransactionResponse, TransactionReceipt, MaxUint256, WebSocketProvider, AbstractProvider, Network } from "ethers";
 import { DEFAULT_RPC_URL, LAU_ABI } from "../constants";
 
 export class Web3Service {
-  private provider: BrowserProvider | JsonRpcProvider;
+  private provider: AbstractProvider;
   private signer: any; // Signer or Wallet
 
   constructor(rpcUrl: string = DEFAULT_RPC_URL, privateKey?: string) {
-    if (privateKey) {
-      const provider = new JsonRpcProvider(rpcUrl);
-      this.signer = new Wallet(privateKey, provider);
-      this.provider = provider;
-    } else if ((window as any).ethereum) {
-      this.provider = new BrowserProvider((window as any).ethereum);
+    // Explicitly define PulseChain network (Chain ID 369)
+    // Using 369n (BigInt) to ensure type compatibility with Ethers v6
+    const pulseNetwork = new Network("pulsechain", 369n);
+
+    // Initialize Provider with explicit network to avoid 'network changed' errors
+    if (rpcUrl.startsWith('wss')) {
+        this.provider = new WebSocketProvider(rpcUrl, pulseNetwork);
     } else {
-      this.provider = new JsonRpcProvider(rpcUrl);
+        // staticNetwork optimization to prevent chainId polling
+        this.provider = new JsonRpcProvider(rpcUrl, pulseNetwork, { staticNetwork: pulseNetwork });
     }
+
+    if (privateKey) {
+      // Backend/Node Mode
+      this.signer = new Wallet(privateKey, this.provider);
+    } 
   }
 
   async connect(): Promise<string> {
-    if (this.signer) {
+    if (this.signer && this.signer.getAddress) {
       return await this.signer.getAddress();
-    } else {
-      await this.provider.send("eth_requestAccounts", []);
-      this.signer = await this.provider.getSigner();
-      return await this.signer.getAddress();
+    } 
+    
+    // Handle Injected Provider (Metamask)
+    if ((window as any).ethereum) {
+       // Create a BrowserProvider specifically for signing
+       // "any" allows the provider to be flexible with underlying network changes handled by the wallet
+       const browserProvider = new BrowserProvider((window as any).ethereum, "any");
+       
+       await browserProvider.send("eth_requestAccounts", []);
+       this.signer = await browserProvider.getSigner();
+       return await this.signer.getAddress();
     }
+    
+    throw new Error("Cannot connect: No wallet found");
   }
 
   async getBalance(address: string): Promise<string> {
@@ -109,7 +126,6 @@ export class Web3Service {
       if (error?.reason) return `Revert: ${error.reason}`;
 
       // 2. Dig into data payload (common in Ethers call exceptions)
-      // FIX: Removed truncation to allow full inspection of revert data
       const data = error?.data || error?.transaction?.data || error?.info?.error?.data;
       if (data && typeof data === 'string' && data.length > 10) {
           return `Revert Data: ${data}`;
@@ -117,7 +133,7 @@ export class Web3Service {
 
       // 3. Handle specific error codes
       if (error?.code === 'CALL_EXCEPTION') {
-          return "Transaction Reverted by Contract. Possible Causes: 1) Insufficient LAU Balance 2) Invalid Address 3) Not Admitted.";
+          return "Transaction Reverted by Contract. Possible Causes: 1) Insufficient LAU Balance 2) Invalid Address 3) Not Admitted 4) Allowance Missing.";
       }
       if (error?.code === 'ACTION_REJECTED' || error?.code === 4001) {
           return "User Rejected Transaction.";
