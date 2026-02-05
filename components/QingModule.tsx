@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { UserContext, LogEntry } from '../types';
+import { UserContext, LogEntry, AppView } from '../types';
 import { Web3Service } from '../services/web3Service';
 import { ADDRESSES, QING_ABI, MAP_ABI, ERC20_ABI, LAU_ABI, YUE_ABI, DYSNOMIA_ABIS, CHO_ABI } from '../constants';
 import { formatEther, isAddress, ZeroAddress, formatUnits } from 'ethers';
@@ -12,6 +12,8 @@ interface QingModuleProps {
   web3: Web3Service | null;
   addLog: (entry: LogEntry) => void;
   setUser: React.Dispatch<React.SetStateAction<UserContext>>;
+  setView?: (view: AppView) => void;
+  onViewIdentity?: (id: string) => void;
 }
 
 interface SectorDetails {
@@ -27,7 +29,7 @@ interface SectorDetails {
 const GENESIS_BLOCK = 22813947;
 const CHUNK_SIZE = 10000;
 
-const QingModule: React.FC<QingModuleProps> = ({ user, web3, addLog, setUser }) => {
+const QingModule: React.FC<QingModuleProps> = ({ user, web3, addLog, setUser, onViewIdentity }) => {
   const [mode, setMode] = useState<'NAV' | 'GENESIS' | 'IO'>('NAV');
   const [sectorView, setSectorView] = useState<'COMMS' | 'OPERATIONS' | 'GOVERNANCE'>('COMMS');
   const [loading, setLoading] = useState(false);
@@ -443,6 +445,25 @@ const QingModule: React.FC<QingModuleProps> = ({ user, web3, addLog, setUser }) 
       reader.readAsText(file);
   };
 
+  const handleResetMap = async () => {
+      if (window.confirm("WARNING: This will clear all map data and sectors. Proceed?")) {
+          await Persistence.clearMapData(ADDRESSES.MAP);
+          setSectors([{ name: 'VOID_ROOT', symbol: 'VOID', address: ADDRESSES.VOID, isSystem: true, integrative: ZeroAddress, waat: "0" }]);
+          setMapMeta(null);
+          addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Map Data Purged.` });
+      }
+  };
+
+  const handlePurgeChat = async () => {
+      if (!selectedSector) return;
+      if (window.confirm(`WARNING: Clear all chat history for ${selectedSector.name}?`)) {
+          await Persistence.clearChatHistory(selectedSector.address);
+          setChannelMeta(null);
+          setDataVersion(prev => prev + 1); // Trigger refresh
+          addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Chat History Purged for ${selectedSector.name}.` });
+      }
+  };
+
   // --- ACTIONS ---
 
   const approveEntry = async () => {
@@ -830,6 +851,8 @@ const QingModule: React.FC<QingModuleProps> = ({ user, web3, addLog, setUser }) 
                                 <p>Manage persistent archives and topology.</p>
                             </div>
                             <div className="grid grid-cols-1 gap-2 border-b border-dys-border pb-4">
+                                <button onClick={handleResetMap} className="bg-dys-red/10 text-dys-red border border-dys-red/50 hover:bg-dys-red hover:text-black py-2 font-bold text-[10px] transition-all">RESET MAP TOPOLOGY</button>
+                                {selectedSector && <button onClick={handlePurgeChat} className="bg-dys-red/10 text-dys-red border border-dys-red/50 hover:bg-dys-red hover:text-black py-2 font-bold text-[10px] transition-all">PURGE SECTOR CHAT [{selectedSector.symbol}]</button>}
                                 <button onClick={() => handleExport('MAP')} className="bg-dys-cyan/10 text-dys-cyan border border-dys-cyan/50 hover:bg-dys-cyan hover:text-black py-2 font-bold text-[10px] transition-all">EXPORT SYSTEM MAP</button>
                                 {selectedSector && <button onClick={() => handleExport('CHAT', selectedSector.address)} className="bg-purple-500/10 text-purple-400 border border-purple-500/50 hover:bg-purple-500 hover:text-white py-2 font-bold text-[10px] transition-all">EXPORT SECTOR CHAT [{selectedSector.symbol}]</button>}
                                 <button onClick={() => handleExport('FULL')} className="bg-dys-gold/10 text-dys-gold border border-dys-gold/50 hover:bg-dys-gold hover:text-black py-2 font-bold text-[10px] transition-all">EXPORT FULL DATABASE</button>
@@ -901,6 +924,7 @@ const QingModule: React.FC<QingModuleProps> = ({ user, web3, addLog, setUser }) 
                                         requestedGap={chatGapRequest}
                                         onGapRequestHandled={() => setChatGapRequest(null)}
                                         onChunkLoaded={handleChatProgress}
+                                        onViewIdentity={onViewIdentity}
                                     />
                                 )}
 

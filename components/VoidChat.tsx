@@ -16,6 +16,7 @@ interface VoidChatProps {
   requestedGap?: { start: number, end: number } | null;
   onGapRequestHandled?: () => void;
   onChunkLoaded?: () => void;
+  onViewIdentity?: (soulId: string) => void;
 }
 
 const SHIO_LOG_ABI = ["event LogEvent(uint64 Soul, uint64 Aura, string LogLine)"];
@@ -35,77 +36,46 @@ interface ChatSegment {
 
 // --- IDENTITY VISUALIZATION HELPERS ---
 
-// 1. Generate consistent Dual Colors from Soul ID
 const getSoulTheme = (soulIdStr: string) => {
     let hash = 0;
     for (let i = 0; i < soulIdStr.length; i++) {
         hash = soulIdStr.charCodeAt(i) + ((hash << 5) - hash);
     }
-    
-    // Primary Color: High Saturation, Standard Lightness
     const h1 = Math.abs(hash) % 360;
     const primary = `hsl(${h1}, 75%, 60%)`;
-
-    // Secondary Color: Shifted Hue, Higher Lightness/Saturation for contrast
-    // We mix the hash again to ensure secondary isn't just a linear shift of primary for everyone
-    const hash2 = (hash * 1664525 + 1013904223) | 0; // Linear Congruential Generator step
+    const hash2 = (hash * 1664525 + 1013904223) | 0; 
     const h2 = Math.abs(hash2) % 360;
     const secondary = `hsl(${h2}, 85%, 70%)`;
-
     return { primary, secondary };
 };
 
-// 2. Generate a symmetric 5x5 pixel avatar (Soul Sigil) with Dual Colors
 const SoulSigil: React.FC<{ soulId: string, size?: number }> = ({ soulId, size = 32 }) => {
     const { primary, secondary } = getSoulTheme(soulId);
-
     const generateMatrix = () => {
         let hash = 0;
         for (let i = 0; i < soulId.length; i++) {
             hash = soulId.charCodeAt(i) + ((hash << 5) - hash);
         }
-        
-        // We use the original hash for the Shape (15 bits for 3x5 half-grid)
         const shapeBits = [];
-        for(let i = 0; i < 15; i++) {
-             shapeBits.push(((hash >> i) & 1) === 1);
-        }
-
-        // We use a scrambled hash for the Color Choice (Primary vs Secondary)
+        for(let i = 0; i < 15; i++) shapeBits.push(((hash >> i) & 1) === 1);
         const colorHash = (hash * 1664525 + 1013904223) | 0;
         const colorBits = [];
-        for(let i = 0; i < 15; i++) {
-            colorBits.push(((colorHash >> i) & 1) === 1);
-        }
-
+        for(let i = 0; i < 15; i++) colorBits.push(((colorHash >> i) & 1) === 1);
         return { shapeBits, colorBits };
     };
-
     const { shapeBits, colorBits } = generateMatrix();
-
     return (
         <svg width={size} height={size} viewBox="0 0 5 5" shapeRendering="crispEdges" className="bg-black border border-white/10 shrink-0">
-            {/* Background */}
             <rect x="0" y="0" width="5" height="5" fill="#050505" />
-            
-            {/* Grid */}
             {Array.from({ length: 5 }).map((_, y) => (
                 Array.from({ length: 3 }).map((_, x) => {
-                    // Index in the linear matrix array
                     const idx = y * 3 + x;
-                    
                     if (shapeBits[idx]) {
-                        // Determine color for this pixel based on the second hash map
                         const fill = colorBits[idx] ? secondary : primary;
-
                         return (
                             <React.Fragment key={`${x}-${y}`}>
-                                {/* Left side */}
                                 <rect x={x} y={y} width="1" height="1" fill={fill} />
-                                {/* Mirrored Right side (if not center column) */}
-                                {x < 2 && (
-                                    <rect x={4 - x} y={y} width="1" height="1" fill={fill} />
-                                )}
+                                {x < 2 && <rect x={4 - x} y={y} width="1" height="1" fill={fill} />}
                             </React.Fragment>
                         );
                     }
@@ -118,18 +88,18 @@ const SoulSigil: React.FC<{ soulId: string, size?: number }> = ({ soulId, size =
 
 // --- MAIN COMPONENT ---
 
-const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddress, addLog, refreshTrigger, requestedGap, onGapRequestHandled, onChunkLoaded }) => {
+const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddress, addLog, refreshTrigger, requestedGap, onGapRequestHandled, onChunkLoaded, onViewIdentity }) => {
   const [segments, setSegments] = useState<ChatSegment[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [fetchingGap, setFetchingGap] = useState<{start: number, end: number} | null>(null);
   const [channelName, setChannelName] = useState('LOADING...');
+  const [hideEvents, setHideEvents] = useState(true); // Default to Hidden
   
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
-  // Refs for scroll maintenance
   const prevScrollHeightRef = useRef<number>(0);
   const prevScrollTopRef = useRef<number>(0);
   const wasAtBottomRef = useRef<boolean>(true); 
@@ -148,6 +118,33 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
             : "LogEvent(string,uint64,uint64,string)";
     return { logSourceAddress, logInterface, topicHash: id(topicSignature) };
   }, [isVoid, viewAddress]);
+
+  const isEventMessage = (msg: ChatMessage) => {
+      const content = msg.content.trim();
+      
+      // Known System/Operational Log Patterns
+      const operationalPatterns = [
+          /^added to/i,
+          /^withdraw of/i,
+          /^username set to/i,
+          /^left play/i,
+          /^cone installed/i,
+          /^entered/i,
+          /^left/i,
+          /^joined/i,
+          /^minted/i,
+          /^burned/i,
+          /^react\(/i,
+          /^alpha\(/i,
+          /^beta\(/i,
+          /^set cover charge/i,
+          /^set admittance/i
+      ];
+
+      if (content.startsWith('{') || content.includes('"type":') || content.startsWith('Type:')) return true;
+      
+      return operationalPatterns.some(regex => regex.test(content));
+  };
 
   const rebuildSegments = async () => {
       if (containerRef.current) {
@@ -492,6 +489,12 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
     }
   };
 
+  const copyHash = (id: string) => {
+      const hash = id.split('-')[0];
+      navigator.clipboard.writeText(hash);
+      addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `TX Hash Copied.` });
+  };
+
   return (
     <div className="flex flex-col h-full bg-black/50 border-t border-dys-border relative overflow-hidden">
       
@@ -508,14 +511,22 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                   </div>
               </div>
           </div>
-          {fetchingGap && (
+          <div className="flex gap-2">
               <button 
-                onClick={cancelFetch}
-                className="text-[9px] bg-dys-red text-black px-2 py-1 font-bold animate-pulse hover:bg-white"
+                onClick={() => setHideEvents(!hideEvents)}
+                className={`text-[9px] border px-2 py-1 font-bold transition-colors ${!hideEvents ? 'bg-white text-black border-white' : 'text-gray-500 border-gray-700 hover:text-white'}`}
               >
-                  CANCEL SCAN
+                  {hideEvents ? 'SHOW EVENTS' : 'HIDE EVENTS'}
               </button>
-          )}
+              {fetchingGap && (
+                  <button 
+                    onClick={cancelFetch}
+                    className="text-[9px] bg-dys-red text-black px-2 py-1 font-bold animate-pulse hover:bg-white"
+                  >
+                      CANCEL SCAN
+                  </button>
+              )}
+          </div>
       </div>
 
       {/* Messages */}
@@ -562,6 +573,8 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                 )}
 
                 {seg.type === 'RANGE' && seg.messages.map((msg) => {
+                    if (hideEvents && isEventMessage(msg)) return null;
+
                     const soulId = msg.sender.replace("SOUL:", "");
                     const displayName = msg.username || "Soul";
                     const { primary } = getSoulTheme(soulId);
@@ -569,9 +582,13 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                     return (
                         <div key={msg.id} className={`flex gap-3 max-w-[95%] ${msg.isMe ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}>
                             {/* AVATAR COLUMN */}
-                            <div className="shrink-0 pt-1">
+                            <button 
+                                onClick={() => onViewIdentity && onViewIdentity(soulId)}
+                                className="shrink-0 pt-1 hover:opacity-80 transition-opacity cursor-pointer"
+                                title="View Identity"
+                            >
                                 <SoulSigil soulId={soulId} size={36} />
-                            </div>
+                            </button>
 
                             {/* CONTENT COLUMN */}
                             <div className={`flex flex-col ${msg.isMe ? 'items-end' : 'items-start'}`}>
@@ -582,12 +599,21 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                                     >
                                         {displayName}
                                     </span>
-                                    <span className="text-gray-700 font-mono text-[10px]">
-                                        [{msg.blockNumber}]
-                                    </span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-gray-700 font-mono text-[10px]">
+                                            [{msg.blockNumber}]
+                                        </span>
+                                        <button 
+                                            onClick={() => copyHash(msg.id)}
+                                            className="text-[9px] text-gray-800 hover:text-dys-cyan transition-colors"
+                                            title="Copy TX Hash"
+                                        >
+                                            #TX
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className={`px-4 py-2 border border-dys-border ${msg.isMe ? 'bg-dys-green/5 border-dys-green/30' : 'bg-dys-panel/80'}`}>
-                                    <p className="font-mono text-sm whitespace-pre-wrap leading-relaxed text-gray-200">
+                                    <p className="font-mono text-sm whitespace-pre-wrap leading-relaxed text-gray-200 break-words max-w-[600px]">
                                         {msg.content}
                                     </p>
                                 </div>

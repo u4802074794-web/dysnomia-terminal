@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect } from 'react';
 import { Web3Service } from '../services/web3Service';
 import { LogEntry } from '../types';
 import { Interface, FunctionFragment, isAddress } from "ethers";
-import { CONTRACT_REGISTRY, ERC20_ABI, DYSNOMIA_ABIS } from '../constants';
+import { CONTRACT_CATALOG, CONTRACT_REGISTRY, ERC20_ABI, DYSNOMIA_ABIS, ContractDoc } from '../constants';
 
 interface ContractStudioProps {
   web3: Web3Service;
@@ -13,8 +14,11 @@ interface ContractInfo {
     address: string;
     name: string;
     type: string;
+    description?: string;
     functions: FunctionFragment[];
     abi: any[];
+    functionDocs?: Record<string, string>;
+    bytecode?: string;
 }
 
 const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
@@ -28,9 +32,10 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
   const [results, setResults] = useState<Record<string, string>>({});
   const [expandedFunc, setExpandedFunc] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [showBytecode, setShowBytecode] = useState(false);
 
   // Load a contract by address
-  const loadContract = async (addr: string, knownName?: string, knownType?: string) => {
+  const loadContract = async (addr: string, catalogEntry?: ContractDoc) => {
     if (!isAddress(addr)) {
         addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Invalid Address: ${addr}` });
         return;
@@ -41,30 +46,50 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
     setContractInfo(null);
     setResults({});
     setInputs({});
+    setShowBytecode(false);
 
     try {
         let abi = ERC20_ABI;
-        let type = knownType || 'ERC20';
-        let name = knownName || 'Unknown';
+        let type = 'ERC20';
+        let name = 'Unknown';
+        let description = '';
+        let functionDocs: Record<string, string> = {};
 
-        // 1. Try to detect Dysnomia Type dynamically
-        const basicContract = web3.getContract(addr, ["function Type() view returns (string)", "function name() view returns (string)"]);
-        
-        try {
-            const detectedType = await basicContract.Type();
-            if (detectedType && DYSNOMIA_ABIS[detectedType]) {
-                type = detectedType;
-                abi = [...ERC20_ABI, ...DYSNOMIA_ABIS[detectedType]]; // Combine base ERC20 with specific
-                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Detected Dysnomia Contract: ${type}` });
+        // 1. Use Catalog Metadata if available
+        if (catalogEntry) {
+            abi = catalogEntry.abi as any;
+            name = catalogEntry.name;
+            description = catalogEntry.description;
+            type = catalogEntry.category;
+            functionDocs = catalogEntry.functionDocs || {};
+        } else {
+            // 2. Try to detect Dysnomia Type dynamically
+            const basicContract = web3.getContract(addr, ["function Type() view returns (string)", "function name() view returns (string)"]);
+            
+            try {
+                const detectedType = await basicContract.Type();
+                if (detectedType && DYSNOMIA_ABIS[detectedType]) {
+                    type = detectedType;
+                    abi = [...ERC20_ABI, ...DYSNOMIA_ABIS[detectedType]]; // Combine base ERC20 with specific
+                    addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Detected Dysnomia Contract: ${type}` });
+                }
+            } catch (e) {
+                // Not a Dysnomia contract with Type()
             }
-        } catch (e) {
-            // Not a Dysnomia contract with Type()
+
+            try {
+                const detectedName = await basicContract.name();
+                if (detectedName) name = detectedName;
+            } catch (e) {}
         }
 
+        // Fetch Bytecode
+        let bytecode = '';
         try {
-            const detectedName = await basicContract.name();
-            if (detectedName) name = detectedName;
-        } catch (e) {}
+            bytecode = await web3.getCode(addr);
+        } catch (e) {
+            console.warn("Failed to fetch bytecode", e);
+        }
 
         // Parse ABI to functions
         const iface = new Interface(abi);
@@ -75,8 +100,11 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
             address: addr,
             name,
             type,
+            description,
             functions,
-            abi: abi as any[]
+            abi: abi as any[],
+            functionDocs,
+            bytecode
         });
 
     } catch (e: any) {
@@ -84,6 +112,20 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
     } finally {
         setLoading(false);
     }
+  };
+  
+  const copyABI = () => {
+      if (!contractInfo || !contractInfo.abi) return;
+      try {
+          const iface = new Interface(contractInfo.abi);
+          const jsonAbi = iface.formatJson();
+          navigator.clipboard.writeText(jsonAbi);
+          addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `ABI Copied to Clipboard` });
+      } catch (e) {
+           console.warn("Failed to format ABI JSON", e);
+           // Fallback to basic stringify if formatJson fails
+           navigator.clipboard.writeText(JSON.stringify(contractInfo.abi, null, 2));
+      }
   };
 
   const handleExecute = async (func: FunctionFragment, args: string[]) => {
@@ -151,22 +193,30 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
             <div className="flex-1 overflow-y-auto p-2 space-y-4 scrollbar-thin">
                 {Object.entries(CONTRACT_REGISTRY).map(([category, contracts]) => (
                     <div key={category}>
-                        <div className="text-[10px] text-gray-500 font-bold uppercase mb-1 px-2">{category}</div>
+                        <div className="text-[10px] text-gray-500 font-bold uppercase mb-1 px-2 border-b border-gray-800 pb-1">{category}</div>
                         <div className="space-y-1">
-                            {Object.entries(contracts).map(([name, addr]) => (
-                                <button
-                                    key={addr}
-                                    onClick={() => loadContract(addr, name)}
-                                    className={`w-full text-left px-3 py-2 text-xs hover:bg-dys-cyan/10 hover:text-dys-cyan border-l-2 transition-all ${
-                                        contractInfo?.address === addr 
-                                        ? 'border-dys-cyan bg-dys-cyan/5 text-dys-cyan' 
-                                        : 'border-transparent text-gray-400'
-                                    }`}
-                                >
-                                    <div className="font-bold truncate">{name}</div>
-                                    <div className="text-[9px] opacity-50 truncate">{addr}</div>
-                                </button>
-                            ))}
+                            {Object.entries(contracts).map(([name, addr]) => {
+                                const catalogItem = CONTRACT_CATALOG.find(c => c.address === addr);
+                                return (
+                                    <button
+                                        key={addr}
+                                        onClick={() => loadContract(addr, catalogItem)}
+                                        className={`w-full text-left px-3 py-2 text-xs hover:bg-dys-cyan/10 hover:text-dys-cyan border-l-2 transition-all group ${
+                                            contractInfo?.address === addr 
+                                            ? 'border-dys-cyan bg-dys-cyan/5 text-dys-cyan' 
+                                            : 'border-transparent text-gray-400'
+                                        }`}
+                                    >
+                                        <div className="font-bold truncate">{name}</div>
+                                        <div className="text-[9px] opacity-50 truncate font-mono">{addr}</div>
+                                        {catalogItem?.description && (
+                                            <div className="hidden group-hover:block absolute left-64 top-auto bg-black border border-dys-cyan p-2 w-64 text-[10px] z-50 shadow-xl">
+                                                {catalogItem.description}
+                                            </div>
+                                        )}
+                                    </button>
+                                );
+                            })}
                         </div>
                     </div>
                 ))}
@@ -196,13 +246,42 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
                                     >
                                         📋
                                     </button>
+                                    {contractInfo.bytecode && contractInfo.bytecode !== '0x' ? (
+                                        <span className="text-dys-green text-[10px] border border-dys-green/30 px-1 rounded">VERIFIED (BYTECODE)</span>
+                                    ) : (
+                                        <span className="text-dys-red text-[10px] border border-dys-red/30 px-1 rounded">UNVERIFIED (NO CODE)</span>
+                                    )}
+                                </div>
+                                {contractInfo.description && (
+                                    <p className="mt-2 text-xs text-gray-400 max-w-2xl italic">
+                                        "{contractInfo.description}"
+                                    </p>
+                                )}
+                            </div>
+                            <div className="text-right text-xs flex flex-col items-end gap-1">
+                                <div className="text-gray-500">FUNCTIONS: <span className="text-dys-cyan font-bold text-sm">{contractInfo.functions.length}</span></div>
+                                <div className="flex gap-2 mt-2">
+                                    <button 
+                                        onClick={copyABI}
+                                        className="text-[10px] border border-gray-700 hover:border-dys-cyan hover:text-dys-cyan px-2 py-1 transition-colors"
+                                    >
+                                        COPY ABI
+                                    </button>
+                                    <button 
+                                        onClick={() => setShowBytecode(!showBytecode)} 
+                                        className="text-[10px] border border-gray-700 hover:border-white hover:text-white px-2 py-1 transition-colors"
+                                    >
+                                        {showBytecode ? 'HIDE CODE' : 'VIEW CODE'}
+                                    </button>
                                 </div>
                             </div>
-                            <div className="text-right text-xs">
-                                <div className="text-gray-500">FUNCTIONS</div>
-                                <div className="text-xl text-dys-cyan font-bold">{contractInfo.functions.length}</div>
-                            </div>
                         </div>
+                        
+                        {showBytecode && contractInfo.bytecode && (
+                            <div className="mt-4 p-2 bg-black border border-gray-800 font-mono text-[9px] text-gray-600 break-all h-24 overflow-y-auto">
+                                {contractInfo.bytecode}
+                            </div>
+                        )}
                     </div>
 
                     {/* Tabs */}
@@ -231,6 +310,7 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
                             {visibleFunctions.map((func) => {
                                 const funcKey = func.format();
                                 const isExpanded = expandedFunc === funcKey;
+                                const doc = contractInfo.functionDocs?.[func.name];
                                 
                                 return (
                                     <div 
@@ -245,9 +325,12 @@ const ContractStudio: React.FC<ContractStudioProps> = ({ web3, addLog }) => {
                                             onClick={() => setExpandedFunc(isExpanded ? null : funcKey)}
                                             className="w-full text-left px-4 py-3 flex justify-between items-center"
                                         >
-                                            <span className={`font-bold text-sm ${activeTab === 'READ' ? 'text-blue-300' : 'text-orange-300'}`}>
-                                                {func.name}
-                                            </span>
+                                            <div className="flex flex-col">
+                                                <span className={`font-bold text-sm ${activeTab === 'READ' ? 'text-blue-300' : 'text-orange-300'}`}>
+                                                    {func.name}
+                                                </span>
+                                                {doc && <span className="text-[10px] text-gray-500">{doc}</span>}
+                                            </div>
                                             <div className="flex gap-2 text-xs text-gray-600">
                                                 {func.inputs.length > 0 && <span>({func.inputs.length} args)</span>}
                                                 <span>{isExpanded ? '−' : '+'}</span>

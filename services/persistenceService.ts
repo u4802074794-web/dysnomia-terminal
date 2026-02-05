@@ -2,7 +2,7 @@
 import { ChatMessage } from '../types';
 
 const DB_NAME = 'DysnomiaDB';
-const DB_VERSION = 1;
+const DB_VERSION = 3; // Incremented for schema updates
 
 export interface SectorData {
     address: string;
@@ -11,6 +11,15 @@ export interface SectorData {
     integrative: string;
     waat: string;
     isSystem: boolean;
+}
+
+export interface LauData {
+    address: string;
+    owner: string;
+    blockNumber: number;
+    timestamp: number;
+    username?: string;
+    soulId?: string; // Added to ensure avatar consistency
 }
 
 export interface Range {
@@ -27,8 +36,9 @@ export interface ChannelMeta {
 export interface ExportPackage {
     version: string;
     timestamp: number;
-    type: 'FULL' | 'MAP' | 'CHAT';
+    type: 'FULL' | 'MAP' | 'CHAT' | 'LAU';
     sectors?: SectorData[];
+    laus?: LauData[];
     channels: {
         address: string;
         meta: ChannelMeta;
@@ -36,7 +46,7 @@ export interface ExportPackage {
     }[];
 }
 
-export type ExportMode = 'FULL' | 'MAP' | 'CHAT';
+export type ExportMode = 'FULL' | 'MAP' | 'CHAT' | 'LAU';
 
 class PersistenceService {
     private dbPromise: Promise<IDBDatabase> | null = null;
@@ -71,10 +81,70 @@ class PersistenceService {
                 if (!db.objectStoreNames.contains('meta')) {
                     db.createObjectStore('meta', { keyPath: 'address' });
                 }
+
+                if (!db.objectStoreNames.contains('laus')) {
+                    const lauStore = db.createObjectStore('laus', { keyPath: 'address' });
+                    lauStore.createIndex('owner', 'owner', { unique: false });
+                    lauStore.createIndex('timestamp', 'timestamp', { unique: false });
+                }
             };
         });
 
         return this.dbPromise;
+    }
+
+    async clearDatabase(): Promise<void> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(['sectors', 'messages', 'meta', 'laus'], 'readwrite');
+            
+            tx.objectStore('sectors').clear();
+            tx.objectStore('messages').clear();
+            tx.objectStore('meta').clear();
+            tx.objectStore('laus').clear();
+
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    // --- GRANULAR CLEARING ---
+
+    async clearChatHistory(tokenAddress: string): Promise<void> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(['messages', 'meta'], 'readwrite');
+            const msgStore = tx.objectStore('messages');
+            const index = msgStore.index('tokenAddress');
+            const range = IDBKeyRange.only(tokenAddress.toLowerCase());
+            
+            // Delete messages for this token
+            const req = index.openCursor(range);
+            req.onsuccess = (event) => {
+                const cursor = (event.target as IDBRequest).result;
+                if (cursor) {
+                    cursor.delete();
+                    cursor.continue();
+                }
+            };
+
+            // Reset scan meta for this token
+            tx.objectStore('meta').delete(tokenAddress.toLowerCase());
+
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async clearMapData(mapAddress: string): Promise<void> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(['sectors', 'meta'], 'readwrite');
+            tx.objectStore('sectors').clear();
+            tx.objectStore('meta').delete(mapAddress.toLowerCase());
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
     }
 
     // --- SECTOR MANAGEMENT ---
@@ -94,6 +164,38 @@ class PersistenceService {
         return new Promise((resolve, reject) => {
             const tx = db.transaction('sectors', 'readonly');
             const request = tx.objectStore('sectors').getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // --- LAU MANAGEMENT ---
+
+    async saveLau(lau: LauData): Promise<void> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('laus', 'readwrite');
+            tx.objectStore('laus').put(lau);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async getAllLaus(): Promise<LauData[]> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('laus', 'readonly');
+            const request = tx.objectStore('laus').getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getLau(address: string): Promise<LauData | undefined> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('laus', 'readonly');
+            const request = tx.objectStore('laus').get(address);
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
         });
@@ -209,10 +311,11 @@ class PersistenceService {
         const db = await this.init();
         
         const exportPkg: ExportPackage = {
-            version: '1.1',
+            version: '1.2',
             timestamp: Date.now(),
             type: mode,
             sectors: [],
+            laus: [],
             channels: []
         };
 
@@ -221,7 +324,12 @@ class PersistenceService {
             exportPkg.sectors = await this.getAllSectors();
         }
 
-        // 2. Export Channels (If Mode is FULL or CHAT)
+        // 2. Export LAUs (If Mode is FULL or LAU)
+        if (mode === 'FULL' || mode === 'LAU') {
+            exportPkg.laus = await this.getAllLaus();
+        }
+
+        // 3. Export Channels (If Mode is FULL or CHAT)
         if (mode === 'FULL' || mode === 'CHAT') {
             let addressesToExport: string[] = [];
             
@@ -258,7 +366,7 @@ class PersistenceService {
         return JSON.stringify(exportPkg, null, 2);
     }
 
-    async importData(jsonString: string): Promise<{ sectorsAdded: number, messagesAdded: number }> {
+    async importData(jsonString: string): Promise<{ sectorsAdded: number, messagesAdded: number, lausAdded: number }> {
         let pkg: ExportPackage;
         try {
             pkg = JSON.parse(jsonString);
@@ -268,6 +376,7 @@ class PersistenceService {
 
         let sectorsAdded = 0;
         let messagesAdded = 0;
+        let lausAdded = 0;
 
         // 1. Import Sectors
         if (pkg.sectors && Array.isArray(pkg.sectors)) {
@@ -277,7 +386,15 @@ class PersistenceService {
             }
         }
 
-        // 2. Import Channels
+        // 2. Import LAUs
+        if (pkg.laus && Array.isArray(pkg.laus)) {
+            for (const lau of pkg.laus) {
+                await this.saveLau(lau);
+                lausAdded++;
+            }
+        }
+
+        // 3. Import Channels
         if (pkg.channels && Array.isArray(pkg.channels)) {
             for (const channel of pkg.channels) {
                 const { address, meta, messages } = channel;
@@ -314,7 +431,7 @@ class PersistenceService {
             }
         }
 
-        return { sectorsAdded, messagesAdded };
+        return { sectorsAdded, messagesAdded, lausAdded };
     }
 }
 

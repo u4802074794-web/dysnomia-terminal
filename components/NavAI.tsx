@@ -1,6 +1,8 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { getGeminiResponse } from '../services/geminiService';
 import { LogEntry, UserContext } from '../types';
+import { CONTRACT_CATALOG } from '../constants';
 
 interface NavAIProps {
   userContext: UserContext;
@@ -24,12 +26,18 @@ const NavAI: React.FC<NavAIProps> = ({ userContext, addLog, currentView }) => {
     setResponse(''); 
 
     try {
+      // Provide condensed knowledge base of known contracts
+      const knowledgeBase = CONTRACT_CATALOG.map(c => 
+          `${c.name} (${c.category}): ${c.description} [Address: ${c.address}]`
+      ).join('\n');
+
       const contextStr = JSON.stringify({
         pilot: userContext.address,
         lau: userContext.lauAddress,
         balance: userContext.balance,
         location: userContext.currentArea,
-        current_module: currentView
+        current_module: currentView,
+        known_contracts: knowledgeBase
       });
       
       const res = await getGeminiResponse(prompt, contextStr);

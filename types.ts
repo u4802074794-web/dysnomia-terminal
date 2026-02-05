@@ -3,6 +3,7 @@ import { Contract, InterfaceAbi } from "ethers";
 export enum AppView {
   DASHBOARD = 'DASHBOARD',
   LAU = 'LAU_IDENTITY',
+  LAU_REGISTRY = 'LAU_REGISTRY',
   YUE = 'YUE_BRIDGE',
   QING = 'QING_NAV',
   VOID_CHAT = 'VOID_CHAT',

@@ -14,6 +14,7 @@ import LauModule from './components/LauModule';
 import YueModule from './components/YueModule';
 import QingModule from './components/QingModule';
 import VoidChat from './components/VoidChat';
+import LauRegistry from './components/LauRegistry';
 
 enum System {
     DYSNOMIA = 'DYSNOMIA',
@@ -34,6 +35,9 @@ const App: React.FC = () => {
   
   // RPC State
   const [activeRpc, setActiveRpc] = useState<string>(DEFAULT_RPC_URL);
+
+  // Registry Navigation State
+  const [registrySearch, setRegistrySearch] = useState('');
 
   // Telemetry
   const [blockNumber, setBlockNumber] = useState<number>(0);
@@ -112,6 +116,11 @@ const App: React.FC = () => {
 
   const resetRpcDefaults = () => {
       setActiveRpc(DEFAULT_RPC_URL);
+  };
+
+  const handleViewIdentity = (id: string) => {
+      setRegistrySearch(id);
+      setView(AppView.LAU_REGISTRY);
   };
 
   // Polling for block stats
@@ -252,10 +261,24 @@ const App: React.FC = () => {
               return <Dashboard user={user} web3={web3} addLog={addLog} setUser={setUser} setView={setView} />;
           case AppView.LAU:
               return <LauModule user={user} web3={web3} addLog={addLog} setUser={setUser} />;
+          case AppView.LAU_REGISTRY:
+              return <LauRegistry 
+                  user={user} 
+                  web3={web3} 
+                  addLog={addLog} 
+                  setUser={setUser} 
+                  initialSearchTerm={registrySearch}
+              />;
           case AppView.YUE:
               return <YueModule user={user} web3={web3} addLog={addLog} />;
           case AppView.QING:
-              return <QingModule user={user} web3={web3} addLog={addLog} setUser={setUser} />;
+              return <QingModule 
+                  user={user} 
+                  web3={web3} 
+                  addLog={addLog} 
+                  setUser={setUser} 
+                  onViewIdentity={handleViewIdentity}
+              />;
           case AppView.VOID_CHAT:
               return <div className="h-full w-full max-w-4xl mx-auto p-6">
                 <VoidChat 
@@ -264,6 +287,7 @@ const App: React.FC = () => {
                     lauArea={user.currentArea}
                     lauAddress={user.lauAddress}
                     addLog={addLog}
+                    onViewIdentity={handleViewIdentity}
                 />
               </div>;
           case AppView.CONTRACT_STUDIO:
@@ -381,6 +405,7 @@ const App: React.FC = () => {
                 {[
                     { id: AppView.DASHBOARD, label: 'BRIDGE' },
                     { id: AppView.LAU, label: 'LAU_SHELL' },
+                    { id: AppView.LAU_REGISTRY, label: 'REGISTRY' },
                     { id: AppView.YUE, label: 'YUE_BRIDGE' },
                     { id: AppView.QING, label: 'QING_NAV' },
                     { id: AppView.VOID_CHAT, label: 'COMMS' },

@@ -49,6 +49,10 @@ export class Web3Service {
     return formatEther(balance);
   }
 
+  async getCode(address: string): Promise<string> {
+    return await this.provider.getCode(address);
+  }
+
   getContract(address: string, abi: InterfaceAbi) {
     if (!this.signer) return new Contract(address, abi, this.provider);
     return new Contract(address, abi, this.signer);
