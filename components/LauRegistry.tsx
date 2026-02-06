@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Web3Service } from '../services/web3Service';
 import { LogEntry, UserContext } from '../types';
 import { ADDRESSES, LAU_ABI, CHO_ABI, QING_ABI } from '../constants';
-import { Persistence, LauData } from '../services/persistenceService';
+import { Persistence, LauData, SectorData } from '../services/persistenceService';
 import { isAddress, ZeroAddress } from 'ethers';
 
 interface LauRegistryProps {
@@ -68,9 +68,23 @@ const SoulSigil: React.FC<{ soulId: string, size?: number }> = ({ soulId, size =
 const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSearchTerm = '' }) => {
     const [laus, setLaus] = useState<LauData[]>([]);
     const [searchQuery, setSearchQuery] = useState(initialSearchTerm);
-    const [isMining, setIsMining] = useState(false);
+    
+    // Scan State
+    const [scanState, setScanState] = useState<{
+        active: boolean;
+        progress: number;
+        total: number;
+        found: number;
+        status: string;
+    }>({
+        active: false,
+        progress: 0,
+        total: 0,
+        found: 0,
+        status: 'IDLE'
+    });
+
     const [loading, setLoading] = useState(false);
-    const [miningStatus, setMiningStatus] = useState<string>('');
     
     // Manual Add State
     const [manualAddress, setManualAddress] = useState('');
@@ -87,12 +101,50 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
         loadData();
     }, []);
 
-    // Respond to prop changes for search (deep linking)
     useEffect(() => {
         if (initialSearchTerm) {
             setSearchQuery(initialSearchTerm);
         }
     }, [initialSearchTerm]);
+
+    // Deep Link Auto-Resolution
+    useEffect(() => {
+        const checkDeepLink = async () => {
+            // Check if searchQuery is a numeric Soul ID and not found in existing list
+            if (searchQuery && /^\d+$/.test(searchQuery) && web3) {
+                const soulExists = laus.some(l => l.soulId === searchQuery);
+                
+                // Only resolve if not found and not currently loading something else
+                if (!soulExists && !loading && !scanState.active) {
+                    addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Resolving Deep Link for Soul #${searchQuery}...` });
+                    setLoading(true);
+                    try {
+                        const cho = web3.getContract(ADDRESSES.CHO, CHO_ABI);
+                        const soulBigInt = BigInt(searchQuery); // Ensure safe integer
+                        const wallet = await cho.GetAddressBySoul(soulBigInt).catch(() => ZeroAddress);
+                        
+                        if (wallet && wallet !== ZeroAddress) {
+                            const lauAddr = await cho.GetUserTokenAddress(wallet).catch(() => ZeroAddress);
+                            if (lauAddr && lauAddr !== ZeroAddress) {
+                                await resolveAndSaveLau(lauAddr, searchQuery, "Deep Link");
+                            } else {
+                                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Soul #${searchQuery} is active but has no LAU Shell.` });
+                            }
+                        } else {
+                             addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Identity Unresolved: Soul #${searchQuery} not found in CHO.` });
+                        }
+                    } catch(e: any) {
+                        console.warn("Deep link resolution failed", e);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+            }
+        };
+
+        const t = setTimeout(checkDeepLink, 800);
+        return () => clearTimeout(t);
+    }, [searchQuery, web3, laus.length]);
 
     const loadData = async () => {
         const storedLaus = await Persistence.getAllLaus();
@@ -101,15 +153,15 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
     };
 
     const handleClearCache = async () => {
-        if (window.confirm("WARNING: This will wipe all local data (Chat History, Registry, Maps). Continue?")) {
-            await Persistence.clearDatabase();
+        if (window.confirm("WARNING: This will wipe only the LAU REGISTRY list. Chat logs and Map data will be preserved. Continue?")) {
+            await Persistence.clearLaus();
             setLaus([]);
-            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Local Database Purged.` });
-            window.location.reload();
+            localStorage.removeItem('dys_scan_sector_idx');
+            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `LAU Registry Cache Purged.` });
+            loadData();
         }
     };
 
-    // Filter Logic
     const filteredLaus = laus.filter(l => 
         l.address.toLowerCase().includes(searchQuery.toLowerCase()) || 
         (l.username && l.username.toLowerCase().includes(searchQuery.toLowerCase())) ||
@@ -117,7 +169,7 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
         (l.soulId && l.soulId.includes(searchQuery))
     );
 
-    // Manual Add Logic
+    // --- MANUAL ADD ---
     const handleManualAdd = async () => {
         if (!web3 || !manualAddress || !isAddress(manualAddress)) {
             addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Invalid Address Format.` });
@@ -128,36 +180,8 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
         addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Probing Address: ${manualAddress}...` });
 
         try {
-            const lauContract = web3.getContract(manualAddress, LAU_ABI);
-            
-            // Check multiple potential valid indicators
-            const [username, owner, type, area, saat1] = await Promise.all([
-                lauContract.Username().catch(() => null),
-                lauContract.owner().catch(() => null),
-                lauContract.Type().catch(() => null),
-                lauContract.CurrentArea().catch(() => null),
-                lauContract.Saat(1).catch(() => 0n)
-            ]);
-
-            // Be permissive: If ANY call succeeded with a valid-looking result, assume it's a LAU
-            if (username || owner || (type && type.includes('LAU')) || area) {
-                const newData: LauData = {
-                    address: manualAddress,
-                    owner: owner || "UNKNOWN",
-                    blockNumber: 0, // Unknown if manually added
-                    timestamp: Date.now(),
-                    username: username || "UNKNOWN",
-                    soulId: saat1 > 0n ? saat1.toString() : undefined
-                };
-                
-                await Persistence.saveLau(newData);
-                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Identity Added: ${username || manualAddress}` });
-                await loadData();
-                setManualAddress('');
-            } else {
-                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `No valid signal from address.` });
-            }
-
+            await resolveAndSaveLau(manualAddress, undefined, "Manual Import");
+            setManualAddress('');
         } catch (e: any) {
             addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Probe Failed: ${e.message}` });
         } finally {
@@ -165,157 +189,158 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
         }
     };
 
-    // --- DEEP DISCOVERY MINING ---
-    const cancelDiscovery = () => {
+    // --- CORE SCANNING LOGIC ---
+
+    const stopScan = () => {
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
-            setIsMining(false);
-            setMiningStatus("CANCELLED");
-            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Discovery Aborted by User.` });
+            abortControllerRef.current = null;
+        }
+        setScanState(prev => ({ ...prev, active: false, status: 'STOPPED' }));
+        addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Scanner Halted.` });
+    };
+
+    const resolveAndSaveLau = async (lauAddr: string, knownSoulId?: string, source: string = "Scan") => {
+        if (!web3) return false;
+        
+        // Check if we already have this address
+        const exists = laus.find(l => l.address.toLowerCase() === lauAddr.toLowerCase());
+        if (exists) {
+             // Update soulId if we found one and didn't have it before
+             if (!exists.soulId && knownSoulId) {
+                 const updated = { ...exists, soulId: knownSoulId };
+                 await Persistence.saveLau(updated);
+                 setLaus(prev => prev.map(l => l.address.toLowerCase() === lauAddr.toLowerCase() ? updated : l));
+                 return true;
+             }
+             return false; 
+        }
+
+        try {
+            const lauContract = web3.getContract(lauAddr, LAU_ABI);
+            
+            // Be more permissive with errors to allow partial data entry if CHO confirmed address
+            const [username, owner, type, saat1] = await Promise.all([
+                lauContract.Username().catch(() => null),
+                lauContract.owner().catch(() => null),
+                lauContract.Type().catch(() => null),
+                lauContract.Saat(1).catch(() => 0n)
+            ]);
+
+            // Validation: Must have at least one valid property or be explicitly confirmed via CHO flow (implicit)
+            const hasData = username !== null || owner !== null || type !== null;
+            if (!hasData) return false;
+
+            const soulId = knownSoulId || (saat1 > 0n ? saat1.toString() : undefined);
+
+            const newLau: LauData = {
+                address: lauAddr,
+                owner: owner || "UNKNOWN",
+                blockNumber: 0,
+                timestamp: Date.now(),
+                username: username || "UNKNOWN",
+                soulId
+            };
+
+            await Persistence.saveLau(newLau);
+            
+            setLaus(prev => {
+                const filtered = prev.filter(l => l.address.toLowerCase() !== lauAddr.toLowerCase());
+                return [newLau, ...filtered];
+            });
+
+            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Identified: ${username || 'Entity'} [${source}]` });
+            return true;
+        } catch {
+            return false;
         }
     };
 
-    const runDeepDiscovery = async () => {
+    // --- SCAN: CHAT LOGS ---
+    const scanChatLogs = async () => {
         if (!web3) return;
-        setIsMining(true);
+        setScanState({ active: true, progress: 0, total: 0, found: 0, status: 'ANALYZING LOGS...' });
         abortControllerRef.current = new AbortController();
         const signal = abortControllerRef.current.signal;
 
         try {
-            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Initializing Deep Discovery Protocol...` });
-
-            // 1. Gather Unique Souls from Chat Logs
-            setMiningStatus("MINING CHAT LOGS...");
             const sectors = await Persistence.getAllSectors();
             const channels = [ADDRESSES.VOID, ...sectors.map(s => s.address)];
-            const souls = new Set<string>();
-            
-            // Optimization: We won't scan literally every message if there are millions, but we scan local DB
+            const uniqueSouls = new Set<string>();
+            let processedMessages = 0;
+
+            // 1. Gather Souls from Messages
             for (const ch of channels) {
                 if (signal.aborted) break;
-                // Fetch recent messages from local DB
-                const msgs = await Persistence.getMessages(ch, 2000); 
+                // Grab all available history from cache
+                const msgs = await Persistence.getMessages(ch, 50000); 
+                processedMessages += msgs.length;
+                
                 msgs.forEach(m => {
-                    // Try to parse soul ID from sender if it's purely numeric
-                    if (m.sender && !isNaN(Number(m.sender))) souls.add(m.sender);
+                    // Extract ID from "SOUL:123" or "123"
+                    const id = m.sender.replace(/[^0-9]/g, '');
+                    if (id && id !== "0") uniqueSouls.add(id);
                 });
+                
+                setScanState(prev => ({ 
+                    ...prev, 
+                    status: `MINING LOGS: ${processedMessages} MSGS SCANNED...` 
+                }));
+                await new Promise(r => setTimeout(r, 5)); // UI Breathe
             }
 
-            const totalCandidates = souls.size;
-            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Identified ${souls.size} Soul Signatures. Resolving...` });
+            const soulArray = Array.from(uniqueSouls);
+            setScanState(prev => ({ 
+                ...prev, 
+                total: soulArray.length, 
+                progress: 0, 
+                status: `RESOLVING ${soulArray.length} SOULS...` 
+            }));
 
-            // 3. Resolve Souls to Wallets to LAUs via CHO
+            // 2. Resolve Souls
             const cho = web3.getContract(ADDRESSES.CHO, CHO_ABI);
-            let resolvedCount = 0;
-            let newlyFound = 0;
+            let foundCount = 0;
 
-            const soulArray = Array.from(souls);
-            
-            // Process in small batches to avoid blocking UI
             for (let i = 0; i < soulArray.length; i++) {
                 if (signal.aborted) break;
                 const soulId = soulArray[i];
                 
-                // Skip if we already have this soulId linked to a LAU
-                const existingLau = laus.find(l => l.soulId === soulId);
-                if (existingLau) continue;
-
-                setMiningStatus(`RESOLVING SOUL ${i+1}/${soulArray.length} [ID: ${soulId}]`);
+                // Skip if we already have this Soul ID in registry
+                if (laus.some(l => l.soulId === soulId)) {
+                    setScanState(prev => ({ ...prev, progress: i + 1 }));
+                    continue;
+                }
 
                 try {
-                    // Step A: Soul -> Wallet
-                    const wallet = await cho.GetAddressBySoul(soulId);
-                    if (!wallet || wallet === ZeroAddress) continue;
-
-                    // Step B: Wallet -> LAU
-                    const lauAddress = await cho.GetUserTokenAddress(wallet);
-                    if (!lauAddress || lauAddress === ZeroAddress) continue;
-
-                    // Step C: Check if exists by Address (double check)
-                    const exists = laus.find(l => l.address.toLowerCase() === lauAddress.toLowerCase());
-                    if (exists) {
-                        // Optional: Update existing record with soulId if missing
-                        if (!exists.soulId) {
-                            await Persistence.saveLau({ ...exists, soulId });
+                    setScanState(prev => ({ ...prev, status: `RESOLVING SOUL ${soulId}...` }));
+                    const soulBigInt = BigInt(soulId);
+                    const wallet = await cho.GetAddressBySoul(soulBigInt);
+                    if (wallet && wallet !== ZeroAddress) {
+                        const lauAddr = await cho.GetUserTokenAddress(wallet);
+                        if (lauAddr && lauAddr !== ZeroAddress) {
+                            const added = await resolveAndSaveLau(lauAddr, soulId, `Soul ${soulId}`);
+                            if (added) foundCount++;
                         }
-                        continue;
                     }
-
-                    // Step D: Validate & Fetch Details
-                    const lauContract = web3.getContract(lauAddress, LAU_ABI);
-                    const username = await lauContract.Username().catch(() => "Unknown");
-
-                    const newLau: LauData = {
-                        address: lauAddress,
-                        owner: wallet,
-                        blockNumber: 0, // Unknown
-                        timestamp: Date.now(),
-                        username,
-                        soulId: soulId
-                    };
-
-                    await Persistence.saveLau(newLau);
-                    newlyFound++;
-                    resolvedCount++;
-                    
-                    // Minor delay to respect RPC rate limits
-                    await new Promise(r => setTimeout(r, 20));
-
-                } catch (e) {
-                    // Soul might not be registered or RPC error
-                }
+                } catch {}
+                
+                setScanState(prev => ({ ...prev, progress: i + 1, found: foundCount }));
+                await new Promise(r => setTimeout(r, 20)); // Rate limit
             }
 
-            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Deep Discovery Complete. ${newlyFound} New Entities Cataloged.` });
-            await loadData();
+            addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Chat Scan Complete. ${foundCount} New Entities.` });
 
         } catch (e: any) {
             if (e.message !== "Aborted") {
-                console.error(e);
-                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Mining Error: ${e.message}` });
+                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Scan Error: ${e.message}` });
             }
         } finally {
-            setIsMining(false);
-            setMiningStatus("");
+            if (!signal.aborted) setScanState(prev => ({ ...prev, active: false, status: 'COMPLETE' }));
             abortControllerRef.current = null;
         }
     };
 
-    // Detail View Logic
-    const viewDetails = async (lau: LauData) => {
-        setSelectedLau(lau);
-        setFetchedDetails(null);
-        if (!web3) return;
-
-        try {
-            const contract = web3.getContract(lau.address, LAU_ABI);
-            const [username, area, saat0, saat1, saat2] = await Promise.all([
-                contract.Username().catch(() => null),
-                contract.CurrentArea().catch(() => null),
-                contract.Saat(0).catch(() => 0n),
-                contract.Saat(1).catch(() => 0n),
-                contract.Saat(2).catch(() => 0n)
-            ]);
-
-            const soulId = saat1 > 0n ? saat1.toString() : lau.soulId;
-
-            // Update local persistence with fresh data
-            if ((username && username !== lau.username) || (soulId && soulId !== lau.soulId)) {
-                const updatedLau = { ...lau, username: username || lau.username, soulId };
-                await Persistence.saveLau(updatedLau);
-                setLaus(prev => prev.map(l => l.address === lau.address ? updatedLau : l));
-            }
-
-            setFetchedDetails({
-                username,
-                currentArea: area,
-                saat: { pole: saat0.toString(), soul: saat1.toString(), aura: saat2.toString() }
-            });
-
-        } catch(e) { console.error(e); }
-    };
-
-    // Import/Export
+    // --- EXPORT/IMPORT ---
     const handleExport = async () => {
         try {
             const json = await Persistence.exportData('LAU');
@@ -351,6 +376,46 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
         reader.readAsText(file);
     };
 
+    // Detail View Logic
+    const viewDetails = async (lau: LauData) => {
+        setSelectedLau(lau);
+        setFetchedDetails(null);
+        if (!web3) return;
+
+        try {
+            const contract = web3.getContract(lau.address, LAU_ABI);
+            const [username, area, saat0, saat1, saat2] = await Promise.all([
+                contract.Username().catch(() => null),
+                contract.CurrentArea().catch(() => null),
+                contract.Saat(0).catch(() => 0n),
+                contract.Saat(1).catch(() => 0n),
+                contract.Saat(2).catch(() => 0n)
+            ]);
+
+            const soulId = saat1 > 0n ? saat1.toString() : lau.soulId;
+
+            // Update persistence with fresh data
+            const updatedLau = { 
+                ...lau, 
+                username: username || lau.username, 
+                soulId,
+                timestamp: Date.now() 
+            };
+            
+            await Persistence.saveLau(updatedLau);
+            
+            setLaus(prev => prev.map(l => l.address === lau.address ? updatedLau : l));
+            setSelectedLau(updatedLau); 
+
+            setFetchedDetails({
+                username,
+                currentArea: area,
+                saat: { pole: saat0.toString(), soul: saat1.toString(), aura: saat2.toString() }
+            });
+
+        } catch(e) { console.error(e); }
+    };
+
     return (
         <div className="h-full flex flex-col bg-dys-black p-4 md:p-8 font-mono text-gray-300">
             <div className="w-full max-w-6xl mx-auto flex flex-col h-full gap-4">
@@ -371,12 +436,6 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
                             />
-                            <button 
-                                onClick={isMining ? cancelDiscovery : runDeepDiscovery}
-                                className={`px-4 py-2 font-bold text-xs border transition-all flex items-center gap-2 ${isMining ? 'bg-dys-red text-black border-dys-red animate-pulse' : 'bg-dys-green/10 text-dys-green border-dys-green/50 hover:bg-dys-green hover:text-black'}`}
-                            >
-                                {isMining ? 'STOP SCAN' : 'DEEP DISCOVERY'}
-                            </button>
                         </div>
                     </div>
 
@@ -402,18 +461,41 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
                              </div>
                         </div>
                         
-                        {/* MINING STATUS */}
-                        <div className="bg-dys-panel border border-dys-border p-3 flex flex-col justify-center">
-                            <div className="flex justify-between items-center mb-1">
-                                <div className="text-[10px] text-gray-500 font-bold uppercase">Discovery Status</div>
-                            </div>
-                            <div className="bg-black border border-gray-800 p-2 h-8 flex items-center justify-center">
-                                {isMining ? (
-                                    <span className="text-[10px] text-dys-gold font-mono animate-pulse">{miningStatus}</span>
-                                ) : (
-                                    <span className="text-[10px] text-gray-600 font-mono">IDLE - READY TO MINE LOGS</span>
+                        {/* DISCOVERY TOOLS */}
+                        <div className="bg-dys-panel border border-dys-border p-3 flex flex-col justify-between">
+                            <div className="flex justify-between items-center mb-2">
+                                <div className="text-[10px] text-gray-500 font-bold uppercase">Discovery Tools</div>
+                                {scanState.active && (
+                                    <button onClick={stopScan} className="text-[9px] text-dys-red bg-dys-red/10 border border-dys-red px-2 animate-pulse hover:bg-dys-red hover:text-black">
+                                        ABORT SCAN
+                                    </button>
                                 )}
                             </div>
+                            
+                            {scanState.active ? (
+                                <div className="space-y-1">
+                                    <div className="flex justify-between text-[9px] text-dys-gold">
+                                        <span>{scanState.status}</span>
+                                        <span>{scanState.progress} / {scanState.total} | {scanState.found} FOUND</span>
+                                    </div>
+                                    <div className="w-full h-2 bg-black border border-gray-800">
+                                        <div 
+                                            className="h-full bg-dys-gold transition-all duration-300"
+                                            style={{ width: `${scanState.total > 0 ? (scanState.progress / scanState.total) * 100 : 0}%` }}
+                                        ></div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex gap-2">
+                                    <button 
+                                        onClick={scanChatLogs}
+                                        disabled={loading}
+                                        className="w-full bg-dys-green/10 text-dys-green border border-dys-green/30 hover:bg-dys-green hover:text-black px-2 py-1 text-[10px] font-bold transition-all"
+                                    >
+                                        SCAN CHAT LOGS
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -424,7 +506,6 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
                     {/* LIST */}
                     <div className="flex-1 overflow-y-auto pr-2 scrollbar-thin grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 content-start pb-4">
                         {filteredLaus.map((lau) => {
-                            // Use soulId for avatar if available, otherwise fallback to address part
                             const seed = lau.soulId || lau.address.substring(2, 8);
                             return (
                                 <button 
@@ -440,7 +521,7 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
                                         <div className="text-[10px] text-gray-600 font-mono truncate">{lau.address}</div>
                                         <div className="flex justify-between mt-1">
                                             <span className="text-[9px] text-gray-700">
-                                                {lau.blockNumber > 0 ? `BLK: ${lau.blockNumber}` : "DISCOVERED"}
+                                                {lau.blockNumber > 0 ? `BLK: ${lau.blockNumber}` : ""}
                                             </span>
                                             {lau.soulId && <span className="text-[9px] text-dys-gold">SOUL: {lau.soulId}</span>}
                                         </div>
@@ -451,7 +532,9 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
                         
                         {filteredLaus.length === 0 && (
                             <div className="col-span-full text-center text-gray-600 py-10 italic">
-                                No entities found. Use 'Deep Discovery' to mine logs or import manually.
+                                {searchQuery ? 
+                                    (loading ? "RESOLVING IDENTITY..." : "NO ENTITIES FOUND.") : 
+                                    "No entities found. Use Discovery Tools to mine logs or import manually."}
                             </div>
                         )}
                     </div>
@@ -501,17 +584,17 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
                                         <div>
                                             <div className="text-[10px] text-dys-gold font-bold uppercase mb-2">Saat Matrix</div>
                                             <div className="grid grid-cols-3 gap-2 text-center">
-                                                <div className="bg-black border border-dys-border p-2">
-                                                    <div className="text-[9px] text-gray-500">POLE</div>
-                                                    <div className="text-xs font-bold text-dys-gold">{fetchedDetails.saat.pole}</div>
+                                                <div className="bg-black border border-dys-border p-2 overflow-hidden">
+                                                    <div className="text-[9px] text-gray-500 mb-1">POLE</div>
+                                                    <div className="text-[10px] font-bold text-dys-gold break-all leading-tight">{fetchedDetails.saat.pole}</div>
                                                 </div>
-                                                <div className="bg-black border border-dys-border p-2">
-                                                    <div className="text-[9px] text-gray-500">SOUL</div>
-                                                    <div className="text-xs font-bold text-dys-gold">{fetchedDetails.saat.soul}</div>
+                                                <div className="bg-black border border-dys-border p-2 overflow-hidden">
+                                                    <div className="text-[9px] text-gray-500 mb-1">SOUL</div>
+                                                    <div className="text-[10px] font-bold text-dys-gold break-all leading-tight">{fetchedDetails.saat.soul}</div>
                                                 </div>
-                                                <div className="bg-black border border-dys-border p-2">
-                                                    <div className="text-[9px] text-gray-500">AURA</div>
-                                                    <div className="text-xs font-bold text-dys-gold">{fetchedDetails.saat.aura}</div>
+                                                <div className="bg-black border border-dys-border p-2 overflow-hidden">
+                                                    <div className="text-[9px] text-gray-500 mb-1">AURA</div>
+                                                    <div className="text-[10px] font-bold text-dys-gold break-all leading-tight">{fetchedDetails.saat.aura}</div>
                                                 </div>
                                             </div>
                                         </div>
@@ -524,7 +607,7 @@ const LauRegistry: React.FC<LauRegistryProps> = ({ web3, user, addLog, initialSe
 
                 {/* FOOTER CONTROLS */}
                 <div className="border-t border-dys-border pt-4 flex gap-4 justify-end shrink-0">
-                     <button onClick={handleClearCache} className="text-[10px] text-dys-red hover:text-white uppercase font-bold border border-transparent hover:border-dys-red px-3 py-1 transition-all mr-auto">NUKE CACHE (RESET DB)</button>
+                     <button onClick={handleClearCache} className="text-[10px] text-dys-red hover:text-white uppercase font-bold border border-transparent hover:border-dys-red px-3 py-1 transition-all mr-auto">NUKE CACHE (LAUS ONLY)</button>
                      <button onClick={handleExport} className="text-[10px] text-gray-500 hover:text-white uppercase font-bold border border-transparent hover:border-gray-500 px-3 py-1 transition-all">EXPORT REGISTRY</button>
                      <label className="text-[10px] text-gray-500 hover:text-white uppercase font-bold border border-transparent hover:border-gray-500 px-3 py-1 transition-all cursor-pointer">
                         {loading ? 'IMPORTING...' : 'IMPORT REGISTRY'}

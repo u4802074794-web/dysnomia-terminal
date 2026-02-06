@@ -13,6 +13,7 @@ import Dashboard from './components/Dashboard';
 import LauModule from './components/LauModule';
 import YueModule from './components/YueModule';
 import QingModule from './components/QingModule';
+import QingMap from './components/QingMap';
 import VoidChat from './components/VoidChat';
 import LauRegistry from './components/LauRegistry';
 
@@ -121,6 +122,13 @@ const App: React.FC = () => {
   const handleViewIdentity = (id: string) => {
       setRegistrySearch(id);
       setView(AppView.LAU_REGISTRY);
+  };
+
+  const handleSelectSector = (address: string) => {
+      // Store selected sector in session storage which QingModule reads
+      sessionStorage.setItem('dys_selected_sector', address);
+      setView(AppView.QING);
+      addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `NAV Vector Set: ${address}` });
   };
 
   // Polling for block stats
@@ -279,6 +287,11 @@ const App: React.FC = () => {
                   setUser={setUser} 
                   onViewIdentity={handleViewIdentity}
               />;
+          case AppView.MAP:
+              return <QingMap 
+                  addLog={addLog} 
+                  onSelectSector={handleSelectSector}
+              />;
           case AppView.VOID_CHAT:
               return <div className="h-full w-full max-w-4xl mx-auto p-6">
                 <VoidChat 
@@ -404,6 +417,7 @@ const App: React.FC = () => {
             <nav className="flex gap-1">
                 {[
                     { id: AppView.DASHBOARD, label: 'BRIDGE' },
+                    { id: AppView.MAP, label: 'MANIFOLD_MAP' },
                     { id: AppView.LAU, label: 'LAU_SHELL' },
                     { id: AppView.LAU_REGISTRY, label: 'REGISTRY' },
                     { id: AppView.YUE, label: 'YUE_BRIDGE' },

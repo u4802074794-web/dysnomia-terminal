@@ -110,6 +110,16 @@ class PersistenceService {
 
     // --- GRANULAR CLEARING ---
 
+    async clearLaus(): Promise<void> {
+        const db = await this.init();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('laus', 'readwrite');
+            tx.objectStore('laus').clear();
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
     async clearChatHistory(tokenAddress: string): Promise<void> {
         const db = await this.init();
         return new Promise((resolve, reject) => {
@@ -153,7 +163,9 @@ class PersistenceService {
         const db = await this.init();
         return new Promise((resolve, reject) => {
             const tx = db.transaction('sectors', 'readwrite');
-            tx.objectStore('sectors').put(sector);
+            // Ensure address is lowercase
+            const safeSector = { ...sector, address: sector.address.toLowerCase() };
+            tx.objectStore('sectors').put(safeSector);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -175,7 +187,9 @@ class PersistenceService {
         const db = await this.init();
         return new Promise((resolve, reject) => {
             const tx = db.transaction('laus', 'readwrite');
-            tx.objectStore('laus').put(lau);
+            // Enforce lowercase address for key consistency
+            const safeLau = { ...lau, address: lau.address.toLowerCase() };
+            tx.objectStore('laus').put(safeLau);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -195,7 +209,7 @@ class PersistenceService {
         const db = await this.init();
         return new Promise((resolve, reject) => {
             const tx = db.transaction('laus', 'readonly');
-            const request = tx.objectStore('laus').get(address);
+            const request = tx.objectStore('laus').get(address.toLowerCase());
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
         });

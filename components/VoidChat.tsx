@@ -580,7 +580,7 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                     const { primary } = getSoulTheme(soulId);
                     
                     return (
-                        <div key={msg.id} className={`flex gap-3 max-w-[95%] ${msg.isMe ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}>
+                        <div key={msg.id} className={`flex gap-3 max-w-[95%] items-start ${msg.isMe ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}>
                             {/* AVATAR COLUMN */}
                             <button 
                                 onClick={() => onViewIdentity && onViewIdentity(soulId)}

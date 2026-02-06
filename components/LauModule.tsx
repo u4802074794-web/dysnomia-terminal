@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { UserContext, LogEntry } from '../types';
 import { Web3Service } from '../services/web3Service';
@@ -373,21 +374,21 @@ const LauModule: React.FC<LauModuleProps> = ({ user, web3, addLog, setUser }) =>
                                 {/* Pole */}
                                 <div className="p-4 border border-dys-green/30 bg-dys-green/5 flex flex-col items-center justify-center h-32 hover:bg-dys-green/10 transition-colors group relative overflow-hidden">
                                     <div className="text-3xl mb-2 opacity-50 group-hover:opacity-100 group-hover:scale-110 transition-all">⏚</div>
-                                    <div className="text-xl text-dys-green font-mono font-bold truncate max-w-full">{user.saat?.pole || "---"}</div>
+                                    <div className="text-[10px] text-dys-green font-mono font-bold break-all text-center leading-tight max-w-full px-2">{user.saat?.pole || "---"}</div>
                                     <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">POLE (0)</div>
                                     {user.saat && <div className="absolute bottom-0 left-0 h-1 bg-dys-green" style={{ width: `${Number(BigInt(user.saat.pole) % 100n)}%` }}></div>}
                                 </div>
                                 {/* Soul */}
                                 <div className="p-4 border border-dys-cyan/30 bg-dys-cyan/5 flex flex-col items-center justify-center h-32 hover:bg-dys-cyan/10 transition-colors group relative overflow-hidden">
                                     <div className="text-3xl mb-2 opacity-50 group-hover:opacity-100 group-hover:scale-110 transition-all">❖</div>
-                                    <div className="text-xl text-dys-cyan font-mono font-bold truncate max-w-full">{user.saat?.soul || "---"}</div>
+                                    <div className="text-[10px] text-dys-cyan font-mono font-bold break-all text-center leading-tight max-w-full px-2">{user.saat?.soul || "---"}</div>
                                     <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">SOUL (1)</div>
                                     {user.saat && <div className="absolute bottom-0 left-0 h-1 bg-dys-cyan" style={{ width: `${Number(BigInt(user.saat.soul) % 100n)}%` }}></div>}
                                 </div>
                                 {/* Aura */}
                                 <div className="p-4 border border-dys-gold/30 bg-dys-gold/5 flex flex-col items-center justify-center h-32 hover:bg-dys-gold/10 transition-colors group relative overflow-hidden">
                                     <div className="text-3xl mb-2 opacity-50 group-hover:opacity-100 group-hover:scale-110 transition-all">⚡</div>
-                                    <div className="text-xl text-dys-gold font-mono font-bold truncate max-w-full">{user.saat?.aura || "---"}</div>
+                                    <div className="text-[10px] text-dys-gold font-mono font-bold break-all text-center leading-tight max-w-full px-2">{user.saat?.aura || "---"}</div>
                                     <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">AURA (2)</div>
                                     {user.saat && <div className="absolute bottom-0 left-0 h-1 bg-dys-gold" style={{ width: `${Number(BigInt(user.saat.aura) % 100n)}%` }}></div>}
                                 </div>
