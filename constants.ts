@@ -1,4 +1,5 @@
 
+
 import { InterfaceAbi } from "ethers";
 
 // Default PulseChain RPC
@@ -391,6 +392,12 @@ export const LAU_FACTORY_ABI: InterfaceAbi = [
 ];
 
 export const MAP_ABI: InterfaceAbi = CONTRACT_CATALOG.find(c => c.name === "MAP")?.abi || [];
+
+export const HECKE_ABI: InterfaceAbi = [
+    "function Meridians(uint256) view returns (uint256)",
+    "function Compliment(uint256) view returns (int256, int256)",
+    "function GetMeridian(uint256) view returns (uint256)"
+];
 
 export const LAU_ABI: InterfaceAbi = [
   "function Username() public view returns (string memory)",

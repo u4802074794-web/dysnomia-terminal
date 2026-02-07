@@ -11,6 +11,10 @@ export interface SectorData {
     integrative: string;
     waat: string;
     isSystem: boolean;
+    hecke?: {
+        lat: string;
+        lon: string;
+    };
 }
 
 export interface LauData {
