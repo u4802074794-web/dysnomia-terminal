@@ -289,6 +289,7 @@ const App: React.FC = () => {
               />;
           case AppView.MAP:
               return <QingMap 
+                  web3={web3}
                   addLog={addLog} 
                   onSelectSector={handleSelectSector}
               />;
