@@ -124,7 +124,7 @@ return `      /|
                             {/* Pole Frequency */}
                             <div className="flex justify-between items-end mt-1">
                                 <span className="text-[10px] text-gray-500">POLE_FREQ</span>
-                                <span className="text-lg font-bold text-dys-green">{user.saat.pole} Hz</span>
+                                <span className="text-sm font-bold text-dys-green break-all text-right">{user.saat.pole} Hz</span>
                             </div>
                           </>
                       ) : (
@@ -165,8 +165,8 @@ return `      /|
                   </div>
 
                   <div className="flex justify-between items-center border-b border-gray-800 pb-1">
-                      <span className="text-gray-500">CURRENT_VECTOR</span>
-                      <span className="text-white truncate max-w-[120px]" title={user.currentArea || 'VOID'}>
+                      <span className="text-gray-500 shrink-0">CURRENT_VECTOR</span>
+                      <span className="text-white break-all text-[9px] text-right" title={user.currentArea || 'VOID'}>
                           {user.currentArea || 'VOID'}
                       </span>
                   </div>
@@ -191,9 +191,9 @@ return `      /|
               </div>
               <div className="mt-4 flex items-center gap-4">
                   <div className="text-3xl">{user.lauAddress ? '👾' : '👤'}</div>
-                  <div>
-                      <div className="text-xl text-white font-bold">{user.username || "GHOST"}</div>
-                      <div className="text-[10px] text-gray-500 font-mono truncate max-w-[150px]">{user.lauAddress || "NO_SHELL"}</div>
+                  <div className="min-w-0">
+                      <div className="text-xl text-white font-bold truncate">{user.username || "GHOST"}</div>
+                      <div className="text-[10px] text-gray-500 font-mono break-all">{user.lauAddress || "NO_SHELL"}</div>
                   </div>
               </div>
                <button 

@@ -2,30 +2,35 @@ import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { SectorData, Persistence } from '../services/persistenceService';
 import { LogEntry } from '../types';
 import { Web3Service } from '../services/web3Service';
-import { MAP_ABI, QING_ABI, HECKE_ABI, ADDRESSES } from '../constants';
+import { HECKE_ABI, ADDRESSES } from '../constants';
 
 interface QingMapProps {
     web3: Web3Service | null;
     addLog: (entry: LogEntry) => void;
     onSelectSector: (address: string) => void;
     viewOnly?: boolean;
+    mapSync?: {
+        isScanning: boolean;
+        progress: string;
+        triggerSync: () => void;
+        stopSync: () => void;
+    };
 }
 
 interface RenderNode {
     x: number;
     y: number;
+    z?: number; // Cached Z
     sector: SectorData;
     mass: number;
-    // Cache projected coords for hit testing
     sx?: number; 
     sy?: number;
-    // Random phase for twinkling
     phase: number;
-    pending?: boolean; // If true, using temporary coords while fetching
-    meridian?: number; // Debug info
+    pending?: boolean;
+    meridian?: number;
 }
 
-// Hecke Meridians (uint256[90]) for computing effective meridian bands
+// Hecke Meridians
 const MERIDIANS = [
     '476733977057179','3256639860692891','145031839926114203','7517342243328022427','390877483220227250075',
     '20325604814018987087771','1056931426015554498647963','54960434128495401099777947','2857942574657447424358537115','148613013882162952633814013851',
@@ -48,34 +53,41 @@ const MERIDIANS = [
     '788007780075465850682698395781331007488376212737722608030423588863419947711'
 ];
 
-// Helper to lerp values
 const lerp = (start: number, end: number, factor: number) => start + (end - start) * factor;
-
-// Hecke Scaling Factor (Derived from reference source)
 const SCALE_LAT = 1.2e72;
 
-const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnly = false }) => {
+const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnly = false, mapSync }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [sectors, setSectors] = useState<SectorData[]>([]);
     const [nodes, setNodes] = useState<RenderNode[]>([]);
     const [hoveredNode, setHoveredNode] = useState<RenderNode | null>(null);
     
+    // View Configuration
+    const [coordSystem, setCoordSystem] = useState<'HECKE' | 'LINEAR'>('HECKE');
+    const [viewMode, setViewMode] = useState<'3D' | '2D'>('3D');
+    
+    // Persistent Gravity Strength
+    const [gravityStrength, setGravityStrength] = useState(() => {
+        const saved = localStorage.getItem('dys_gravity_strength');
+        return saved ? parseFloat(saved) : 0.25;
+    });
+
+    useEffect(() => {
+        localStorage.setItem('dys_gravity_strength', gravityStrength.toString());
+    }, [gravityStrength]);
+
     // Data Loading State
     const [isScanning, setIsScanning] = useState(false);
     
-    // Toggle State - Default to HECKE as canonical
-    const [coordSystem, setCoordSystem] = useState<'LINEAR' | 'HECKE'>('HECKE');
-
     // Selection State
     const [selectedSectorAddr, setSelectedSectorAddr] = useState<string | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [isSidebarOpen, setSidebarOpen] = useState(true);
 
-    // --- CAMERA REFS (Decoupled from React State for smooth loop) ---
     const camera = useRef({
-        x: 0, y: 0,           // Current Offset
-        tx: 0, ty: 0,         // Target Offset
+        x: 0, y: 0,           
+        tx: 0, ty: 0,         
         zoom: viewOnly ? 0.45 : 0.6, tZoom: viewOnly ? 0.45 : 0.6,
         tilt: 0.8, tTilt: 0.8,
         rot: 0.5, tRot: 0.5
@@ -84,20 +96,18 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
     const interaction = useRef({
         isDown: false,
         isDragging: false,
-        startX: 0, startY: 0,    // Where drag started
-        currentX: 0, currentY: 0, // Current mouse pos (for hover)
-        lastX: 0, lastY: 0,      // Last frame pos (for delta)
+        startX: 0, startY: 0,    
+        currentX: 0, currentY: 0,
+        lastX: 0, lastY: 0,      
         mode: 'PAN' as 'PAN' | 'ORBIT'
     });
 
-    // Tracking for fetch to avoid loops
     const isFetchingRef = useRef(false);
 
     useEffect(() => {
         const loadSectors = async () => {
             const data = await Persistence.getAllSectors();
             setSectors(data);
-            // Auto-select VOID if nothing selected (only in interactive mode)
             if (!selectedSectorAddr && !viewOnly) {
                  const saved = sessionStorage.getItem('dys_selected_sector');
                  if(saved) setSelectedSectorAddr(saved);
@@ -118,15 +128,10 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
             addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Resolving Hecke Coordinates for ${missing.length} sectors...` });
 
             const heckeContract = web3.getContract(ADDRESSES.HECKE, HECKE_ABI);
-            
-            // Process in batches
-            const BATCH_SIZE = 5;
+            const BATCH_SIZE = 20;
             let updatedCount = 0;
 
             for (let i = 0; i < missing.length; i += BATCH_SIZE) {
-                // Check if user switched back while fetching
-                // if (coordSystem !== 'HECKE') break; 
-
                 const batch = missing.slice(i, i + BATCH_SIZE);
                 const updates: SectorData[] = [];
 
@@ -135,29 +140,21 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                         const [lon, lat] = await heckeContract.Compliment(s.waat);
                         const updated = {
                             ...s,
-                            hecke: {
-                                lat: lat.toString(),
-                                lon: lon.toString()
-                            }
+                            hecke: { lat: lat.toString(), lon: lon.toString() }
                         };
                         await Persistence.saveSector(updated);
                         updates.push(updated);
-                    } catch (e) {
-                        // console.warn(`Failed to fetch Hecke for ${s.name}`, e);
-                    }
+                    } catch (e) { }
                 }));
                 
                 updatedCount += updates.length;
-                
                 if (updates.length > 0) {
                      setSectors(prev => prev.map(p => {
                          const match = updates.find(u => u.address === p.address);
                          return match || p;
                      }));
                 }
-
-                // Small delay to be polite to RPC
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 50));
             }
              
             if (updatedCount > 0) {
@@ -169,7 +166,20 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
         fetchHecke();
     }, [coordSystem, sectors.length, web3]);
 
-    // --- HECKE CALCULATION UTILS ---
+    // VIEW MODE SWITCHING
+    useEffect(() => {
+        if (viewMode === '2D') {
+            camera.current.tTilt = 0;
+            camera.current.tRot = 0;
+            camera.current.tilt = 0;
+            camera.current.rot = 0;
+        } else {
+            camera.current.tTilt = 0.8;
+            camera.current.tRot = 0.5;
+        }
+    }, [viewMode]);
+
+    // HECKE CALCULATION UTILS
     const getMeridianFromWaat = (waatBigInt: bigint): number => {
         for (let i = 0; i < MERIDIANS.length; i++) {
             if (BigInt(MERIDIANS[i]) >= waatBigInt) return i;
@@ -182,14 +192,7 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
         const rawLat = Number(rawLatStr);
         const rawLon = BigInt(rawLonStr);
         
-        // 1. Determine Meridian
-        // Note: The sector data doesn't explicitly store Meridian index, so we recalculate it from Waat.
-        // Or if we stored it, we could use it. Recalculation is safer.
         let meridian = getMeridianFromWaat(waatBig);
-        
-        // 2. Handle Flip (Meridian 89 in Northern Hemisphere)
-        // If Meridian is 89 and Raw Lat is POSITIVE, it means we wrapped around the North Pole.
-        // We need to flip back to find the "Effective" meridian and waat position.
         const isFlipped = meridian === 89 && rawLat > 0;
         let effectiveMeridian = meridian;
         let effectiveWaat = waatBig;
@@ -200,7 +203,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
             effectiveMeridian = getMeridianFromWaat(effectiveWaat);
         }
 
-        // 3. Calculate Longitude Degree based on Meridian Band
         const bandIdx = effectiveMeridian;
         const bandStart = bandIdx > 0 ? BigInt(MERIDIANS[bandIdx - 1]) : 0n;
         const bandEnd = BigInt(MERIDIANS[bandIdx]);
@@ -209,43 +211,32 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
 
         let fraction = 0;
         if (isFlipped) {
-            // Position within effective band
             const posInBand = effectiveWaat - bandStart;
             if (bandWidth !== 0n) {
                 fraction = (Number(posInBand) / Number(bandWidth)) * 2 - 1;
                 fraction = Math.max(-1, Math.min(1, fraction));
             }
         } else {
-            // Standard Longitude mapping
             if (halfBand !== 0n) {
                 fraction = Number(rawLon) / Number(halfBand);
                 fraction = Math.max(-1, Math.min(1, fraction));
             }
         }
 
-        // 4 degrees per meridian (360 / 90)
-        // Global Longitude = MeridianIndex * 4 + Offset within band
-        // fraction (-1 to 1) * 2 gives us a +/- 2 degree range within the 4 degree band
         const offsetDeg = fraction * 2;
         let lonDeg = effectiveMeridian * 4 + offsetDeg;
         
-        // Normalize 0-360 to -180 to 180
         lonDeg = ((lonDeg % 360) + 360) % 360;
         if (lonDeg > 180) lonDeg -= 360;
 
-        // 4. Calculate Latitude Degree
-        // Use the large scaling factor derived from 1e72 range
         let latDeg = (rawLat / SCALE_LAT) * 90;
-        if (isFlipped) {
-            latDeg = -latDeg; // Invert latitude for the flipped northern sector
-        }
+        if (isFlipped) latDeg = -latDeg; 
         
         latDeg = Number.isFinite(latDeg) ? Math.max(-90, Math.min(90, latDeg)) : 0;
 
         return { lat: latDeg, lon: lonDeg, meridian: effectiveMeridian };
     };
 
-    // Convert Waat/Hecke to Lat/Lon & Physics Props
     useEffect(() => {
         const calcNodes = sectors.map(s => {
             let lat = 0, lon = 0;
@@ -253,14 +244,12 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
             let mIndex = 0;
             
             if (coordSystem === 'LINEAR') {
-                // Classic Linear Modulo Mapping
                 try {
                     const waatBn = BigInt(s.waat);
                     lat = Number(waatBn % 180n) - 90;
                     lon = Number((waatBn / 180n) % 360n) - 180;
                 } catch (e) { }
             } else {
-                // Hecke Mapping
                 if (s.hecke) {
                     try {
                         const coords = getQingCoords(s.waat, s.hecke.lat, s.hecke.lon);
@@ -269,7 +258,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                         mIndex = coords.meridian;
                     } catch (e) { }
                 } else {
-                    // FALLBACK FOR LOADING NODES
                     isPending = true;
                     if (s.address !== ADDRESSES.VOID) {
                         const seed = parseInt(s.address.slice(2, 8), 16);
@@ -296,13 +284,13 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
         setNodes(calcNodes);
     }, [sectors, coordSystem]);
 
-    // Focus Camera on Selection Logic
     useEffect(() => {
         if (selectedSectorAddr && !viewOnly) {
-             const node = nodes.find(n => n.sector.address === selectedSectorAddr);
-             // Center logic handled via interaction or explicit reset usually
+             handleFocusSector(selectedSectorAddr);
         }
     }, [selectedSectorAddr, nodes, viewOnly]);
+
+    const is3D = () => viewMode === '3D';
 
     // --- ANIMATION LOOP ---
     useEffect(() => {
@@ -316,7 +304,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
         let animationFrameId: number;
 
         const render = (time: number) => {
-            // 1. Resize handling
             if (canvas.width !== container.clientWidth || canvas.height !== container.clientHeight) {
                 canvas.width = container.clientWidth;
                 canvas.height = container.clientHeight;
@@ -324,13 +311,11 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
             const width = canvas.width;
             const height = canvas.height;
 
-            // 2. Physics Interpolation (Smooth Camera)
             const cam = camera.current;
-            const factor = 0.1; // Smoothness factor
+            const factor = 0.1; 
             
-            // Auto-Rotation for View Only Mode
             if (viewOnly) {
-                cam.tRot += 0.004; // RESTORED ROTATION SPEED
+                cam.tRot += 0.004; 
                 cam.tTilt = 0.8 + Math.sin(time / 4000) * 0.15;
             }
 
@@ -340,28 +325,24 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
             cam.tilt = lerp(cam.tilt, cam.tTilt, factor);
             cam.rot = lerp(cam.rot, cam.tRot, factor);
 
-            // 3. Projection Setup
             const cx = width / 2 + cam.x;
             const cy = height / 2 + cam.y;
             const scale = Math.min(width, height) / 180 * cam.zoom; 
 
-            // Clear
             ctx.fillStyle = '#050505';
             ctx.fillRect(0, 0, width, height);
 
             // --- 3D MATH ---
             const getZ = (x: number, y: number) => {
+                if (!is3D()) return 0;
                 let z = 0;
                 for (const node of nodes) {
-                    // SKIP PENDING NODES from gravity calculation
                     if (node.pending) continue;
-
                     const dx = x - node.x;
                     const dy = y - node.y;
                     const distSq = dx*dx + dy*dy;
-                    
-                    // Manifold Gravity Logic (Restored to original, no hard clamping)
-                    z -= (node.mass * 0.5) / (1 + distSq * 0.05);
+                    // UNCLAMPED GRAVITY (User Requested)
+                    z -= (node.mass * gravityStrength) / (1 + distSq * 0.05);
                 }
                 return z;
             };
@@ -380,7 +361,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                 return { sx, sy, rx, ry };
             };
 
-            // --- GRID RENDERING ---
             const gridSize = 3; 
             const subSteps = 1; 
 
@@ -402,8 +382,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
             };
 
             ctx.lineWidth = 1;
-            
-            // Grid Lines - Dimmer for ViewOnly to emphasize shape over noise
             const gridOpacity = viewOnly ? 0.08 : 0.12;
             
             for (let lat = -90; lat <= 90; lat += gridSize * 2) {
@@ -420,24 +398,20 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                 drawPoly(points);
             }
 
-            // --- HIT TEST PREP ---
             let closestNode: RenderNode | null = null;
             let minDescSq = Infinity;
 
-            // --- NODES RENDERING ---
             nodes.forEach(node => {
-                // Pending nodes use simple Z, others use gravity Z
                 const z = node.pending ? 0 : getZ(node.x, node.y);
                 const p = project(node.x, node.y, z);
                 
+                node.z = z;
                 node.sx = p.sx;
                 node.sy = p.sy;
 
-                // Hit Test Logic inside Loop
                 if (!viewOnly) {
                     const mx = interaction.current.currentX;
                     const my = interaction.current.currentY;
-                    
                     const distSq = (mx - p.sx)**2 + (my - p.sy)**2;
                     if (distSq < 225 && distSq < minDescSq) {
                         minDescSq = distSq;
@@ -450,25 +424,18 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                 const isHover = hoveredNode === node;
                 const isSelected = selectedSectorAddr === node.sector.address;
                 
-                // --- VISUAL LOGIC ---
-                // "Wave" effect based on spatial position + time
                 const wave = Math.sin((node.x * 0.05) + (time / 2000));
-                // "Twinkle" effect based on random phase
                 const twinkle = Math.sin((time / (800 + node.mass * 5)) + node.phase);
                 
-                // Base size is smaller in viewOnly
                 const baseSize = viewOnly ? 1.5 : 2.5;
                 const sizeMod = (wave * 0.5) + (twinkle * 0.3);
                 
-                // Selected/Hovered are significantly larger/brighter
                 let radius = (isHover || isSelected) 
                     ? 6 
                     : (baseSize + sizeMod) * (cam.zoom < 1 ? 1 : cam.zoom * 0.8);
                 
-                // Clamp min radius
                 radius = Math.max(0.8, radius);
 
-                // --- SELECTION RINGS ---
                 if (isSelected && !viewOnly) {
                     ctx.save();
                     ctx.translate(p.sx, p.sy);
@@ -477,22 +444,18 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                     ctx.lineWidth = 2;
                     ctx.setLineDash([10, 5]);
                     ctx.beginPath();
-                    // Ensure ring radius is positive. Wave is -1 to 1. 15 + wave*2 is always positive (min 13).
                     ctx.arc(0, 0, 15 + wave * 2, 0, Math.PI * 2);
                     ctx.stroke();
                     ctx.restore();
                 }
 
-                // --- NODE BODY ---
                 ctx.beginPath();
                 ctx.arc(p.sx, p.sy, radius, 0, Math.PI * 2);
                 
-                // Opacity Logic: ViewOnly is fainter to let grid show. Wave affects alpha.
                 const baseAlpha = viewOnly ? 0.4 : 0.7;
                 const waveAlpha = 0.2 * wave; 
                 let finalAlpha = Math.max(0.2, Math.min(1, baseAlpha + waveAlpha));
 
-                // PENDING NODES ARE DIMMER
                 if (node.pending) finalAlpha *= 0.3;
 
                 ctx.fillStyle = node.sector.isSystem 
@@ -501,14 +464,9 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                 
                 ctx.fill();
 
-                // --- GLOW (Only for high mass or active nodes) ---
-                // Don't draw glow for every single node in viewOnly mode to reduce crowding
-                // Don't draw glow for pending nodes
                 if ((!viewOnly || node.mass > 20 || wave > 0.8) && !node.pending) {
                     ctx.beginPath();
-                    // Glow size based on mass (entropy)
                     const calculatedGlow = radius + (node.mass / 20) + (wave * 2);
-                    // CLAMP TO PREVENT NEGATIVE RADIUS ERROR
                     const glowSize = Math.max(radius + 0.5, calculatedGlow);
                     
                     ctx.arc(p.sx, p.sy, glowSize, 0, Math.PI * 2);
@@ -522,7 +480,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                     ctx.stroke();
                 }
                 
-                // Label
                 if (!viewOnly && (cam.zoom > 2 || node.sector.isSystem || isHover || isSelected)) {
                     ctx.font = '9px "JetBrains Mono"';
                     ctx.fillStyle = (isHover || isSelected) ? '#fff' : 'rgba(255,255,255,0.5)';
@@ -531,12 +488,10 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                 }
             });
 
-            // Update Hover State
             if (closestNode !== hoveredNode) {
                 setHoveredNode(closestNode);
             }
 
-            // --- HUD OVERLAY (Hover) ---
             if (!viewOnly && hoveredNode && hoveredNode.sx !== undefined && hoveredNode.sy !== undefined && !interaction.current.isDragging) {
                 const hx = hoveredNode.sx;
                 const hy = hoveredNode.sy;
@@ -562,9 +517,7 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
 
         render(0);
         return () => cancelAnimationFrame(animationFrameId);
-    }, [nodes, hoveredNode, selectedSectorAddr, viewOnly]);
-
-    // --- LOGIC ---
+    }, [nodes, hoveredNode, selectedSectorAddr, viewOnly, viewMode, gravityStrength]);
 
     const handleFocusSector = (addr: string) => {
         if (viewOnly) return;
@@ -573,22 +526,26 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
         
         if (node && containerRef.current) {
             const cam = camera.current;
-            const cosRot = Math.cos(cam.tRot);
-            const sinRot = Math.sin(cam.tRot);
-            
-            const rx = node.x * cosRot - node.y * sinRot;
-            const ry = node.x * sinRot + node.y * cosRot;
-            
-            let z = 0;
-            
             const rect = containerRef.current.getBoundingClientRect();
             const width = rect.width;
             const height = rect.height;
             const scale = Math.min(width, height) / 180 * cam.tZoom;
 
-            camera.current.tx = -rx * scale;
-            camera.current.ty = -(ry * Math.cos(cam.tTilt) - z * Math.sin(cam.tTilt)) * scale;
+            // Simplified Centering: Focus on (X,Y) ground position.
+            // Ignoring Z for focus calculation prevents "jumping" when gravity is strong.
+            camera.current.tx = -node.x * scale;
+            camera.current.ty = -node.y * scale;
         }
+    };
+
+    const handleSync = async () => {
+        setIsScanning(true);
+        // Soft Sync: Just reload from DB, assuming Navigation or other modules are doing the heavy lifting
+        await new Promise(r => setTimeout(r, 1000));
+        const data = await Persistence.getAllSectors();
+        setSectors(data);
+        setIsScanning(false);
+        addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Map Visualization Updated.` });
     };
 
     const handleInteraction = (e: React.MouseEvent | React.TouchEvent, type: 'DOWN' | 'MOVE' | 'UP') => {
@@ -624,13 +581,23 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
 
                 if (interaction.current.isDragging) {
                     const cam = camera.current;
+                    //const sensitivity = 1.5 / cam.zoom; // Slightly damp sensitivity
+
                     if (interaction.current.mode === 'PAN') {
+                        // Apply movement immediately to both target and current pos to remove inertia/lag
+                        // const moveX = dx * sensitivity;
+                        // const moveY = dy * sensitivity;
+                        // cam.tx += moveX;
+                        // cam.ty += moveY;
+                        // cam.x += moveX;
+                        // cam.y += moveY;
                         cam.tx += dx;
                         cam.ty += dy;
                         cam.x += dx; 
                         cam.y += dy;
                     } else {
-                        cam.tRot -= dx * 0.005;
+                        // Standard Orbit: Left Drag = Rotate Left. Down Drag = Tilt Up (Look down)
+                        cam.tRot -= dx * 0.005; // Reverted to negative for natural drag
                         cam.rot -= dx * 0.005;
                         cam.tTilt = Math.min(Math.max(0, cam.tTilt - dy * 0.005), Math.PI / 2.1);
                         cam.tilt = cam.tTilt;
@@ -645,55 +612,6 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                  handleFocusSector(hoveredNode.sector.address);
             }
             interaction.current.isDragging = false; 
-        }
-    };
-
-    const handleSync = async () => {
-        if (!web3 || viewOnly) return;
-        setIsScanning(true);
-        addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Scanning Topology...` });
-
-        try {
-            const currentBlock = await web3.getProvider().getBlockNumber();
-            const mapContract = web3.getContract(ADDRESSES.MAP, MAP_ABI);
-            const range = 50000;
-            const start = Math.max(22813947, currentBlock - range);
-            const events = await mapContract.queryFilter("NewQing", start, currentBlock);
-            
-            if (events.length > 0) {
-                const newSectors: SectorData[] = [];
-                for(const e of events) {
-                    // @ts-ignore
-                    const [qAddr, intAddr, waat] = e.args;
-                    try {
-                        const q = web3.getContract(qAddr, QING_ABI);
-                        const [name, sym] = await Promise.all([q.name(), q.symbol()]);
-                        const s: SectorData = {
-                            address: qAddr,
-                            name,
-                            symbol: sym,
-                            integrative: intAddr,
-                            waat: waat.toString(),
-                            isSystem: false
-                        };
-                        newSectors.push(s);
-                        await Persistence.saveSector(s);
-                    } catch {}
-                }
-                setSectors(prev => {
-                    const existing = new Set(prev.map(s => s.address.toLowerCase()));
-                    const filtered = newSectors.filter(s => !existing.has(s.address.toLowerCase()));
-                    return [...prev, ...filtered];
-                });
-                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Topology Updated: ${newSectors.length} Vectors Found.` });
-            } else {
-                addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `Topology Up to Date.` });
-            }
-
-        } catch (e: any) {
-             addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Scan Failed: ${e.message}` });
-        } finally {
-            setIsScanning(false);
         }
     };
 
@@ -736,21 +654,53 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                         <div className="p-4 border-b border-dys-border bg-dys-panel/50">
                             <h2 className="text-dys-cyan font-bold tracking-widest text-sm mb-2">SECTOR_REGISTRY</h2>
                             
-                            {/* COORD TOGGLE - Placed here for accessibility */}
-                            <div className="flex gap-1 mb-3">
-                                <button 
-                                    onClick={() => setCoordSystem('LINEAR')}
-                                    className={`flex-1 py-1 text-[9px] font-bold border transition-colors ${coordSystem === 'LINEAR' ? 'bg-dys-cyan text-black border-dys-cyan' : 'border-gray-700 text-gray-500 hover:text-white'}`}
-                                >
-                                    LINEAR (LEGACY)
-                                </button>
+                            {/* COORD TOGGLE */}
+                            <div className="flex gap-1 mb-2">
                                 <button 
                                     onClick={() => setCoordSystem('HECKE')}
                                     className={`flex-1 py-1 text-[9px] font-bold border transition-colors ${coordSystem === 'HECKE' ? 'bg-dys-cyan text-black border-dys-cyan' : 'border-gray-700 text-gray-500 hover:text-white'}`}
                                 >
-                                    HECKE
+                                    HECKE (STD)
+                                </button>
+                                <button 
+                                    onClick={() => setCoordSystem('LINEAR')}
+                                    className={`flex-1 py-1 text-[9px] font-bold border transition-colors ${coordSystem === 'LINEAR' ? 'bg-dys-cyan text-black border-dys-cyan' : 'border-gray-700 text-gray-500 hover:text-white'}`}
+                                >
+                                    LINEAR
                                 </button>
                             </div>
+
+                            {/* VIEW TOGGLES */}
+                            <div className="flex gap-1 mb-3 border-t border-gray-800 pt-2">
+                                <button 
+                                    onClick={() => setViewMode('3D')}
+                                    className={`flex-1 py-1 text-[9px] font-bold border transition-colors ${viewMode === '3D' ? 'bg-dys-gold text-black border-dys-gold' : 'border-gray-700 text-gray-500 hover:text-white'}`}
+                                >
+                                    PROJECTION: 3D
+                                </button>
+                                <button 
+                                    onClick={() => setViewMode('2D')}
+                                    className={`flex-1 py-1 text-[9px] font-bold border transition-colors ${viewMode === '2D' ? 'bg-dys-gold text-black border-dys-gold' : 'border-gray-700 text-gray-500 hover:text-white'}`}
+                                >
+                                    GRID: 2D
+                                </button>
+                            </div>
+
+                            {viewMode === '3D' && (
+                                <div className="mb-3 px-1">
+                                    <div className="flex justify-between text-[9px] text-gray-500 mb-1">
+                                        <span>GRAVITY WELL</span>
+                                        <span>{(gravityStrength * 100).toFixed(0)}%</span>
+                                    </div>
+                                    <input 
+                                        type="range" 
+                                        min="0" max="1" step="0.05" 
+                                        value={gravityStrength}
+                                        onChange={(e) => setGravityStrength(parseFloat(e.target.value))}
+                                        className="w-full accent-dys-cyan h-1 bg-gray-800 appearance-none"
+                                    />
+                                </div>
+                            )}
 
                             <input 
                                 className="w-full bg-black border border-dys-border p-2 text-xs text-white focus:border-dys-cyan outline-none font-mono mb-2"
@@ -759,11 +709,11 @@ const QingMap: React.FC<QingMapProps> = ({ web3, addLog, onSelectSector, viewOnl
                                 onChange={(e) => setSearchQuery(e.target.value)}
                             />
                             <button 
-                                onClick={handleSync}
-                                disabled={isScanning}
-                                className={`w-full py-1 text-[10px] font-bold border transition-colors ${isScanning ? 'bg-dys-gold text-black border-dys-gold animate-pulse' : 'bg-black text-dys-gold border-dys-gold hover:bg-dys-gold hover:text-black'}`}
+                                onClick={mapSync ? (mapSync.isScanning ? mapSync.stopSync : mapSync.triggerSync) : handleSync}
+                                disabled={mapSync ? false : isScanning}
+                                className={`w-full py-1 text-[10px] font-bold border transition-colors ${isScanning || (mapSync && mapSync.isScanning) ? 'bg-dys-gold text-black border-dys-gold animate-pulse' : 'bg-black text-dys-gold border-dys-gold hover:bg-dys-gold hover:text-black'}`}
                             >
-                                {isScanning ? 'SYNCING TOPOLOGY...' : 'SYNC DATA'}
+                                {mapSync ? (mapSync.isScanning ? `STOP SCAN [${mapSync.progress}]` : 'FULL SYNC (CHAIN)') : (isScanning ? 'REFRESHING...' : 'REFRESH VIEW')}
                             </button>
                         </div>
                         <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">

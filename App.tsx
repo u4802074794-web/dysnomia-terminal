@@ -1,9 +1,9 @@
-
-import React, { useState, useEffect } from 'react';
-import { formatUnits } from 'ethers';
+import React, { useState, useEffect, useRef } from 'react';
+import { formatUnits, ZeroAddress } from 'ethers';
 import { Web3Service } from './services/web3Service';
 import { AppView, LogEntry, UserContext } from './types';
-import { ADDRESSES, DEFAULT_RPC_URL, GEMINI_MODELS } from './constants';
+import { ADDRESSES, DEFAULT_RPC_URL, GEMINI_MODELS, MAP_ABI, QING_ABI } from './constants';
+import { Persistence, SectorData } from './services/persistenceService';
 
 // Components
 import TerminalLog from './components/TerminalLog';
@@ -12,7 +12,7 @@ import ContractStudio from './components/ContractStudio';
 import Dashboard from './components/Dashboard';
 import LauModule from './components/LauModule';
 import YueModule from './components/YueModule';
-import QingModule from './components/QingModule';
+import { QingModule } from './components/QingModule';
 import QingMap from './components/QingMap';
 import VoidChat from './components/VoidChat';
 import LauRegistry from './components/LauRegistry';
@@ -22,6 +22,9 @@ enum System {
     ATROPA = 'ATROPA',
     BREZ = 'BREZ'
 }
+
+const GENESIS_BLOCK = 22813947;
+const CHUNK_SIZE = 25000;
 
 const App: React.FC = () => {
   const [activeSystem, setActiveSystem] = useState<System>(System.DYSNOMIA);
@@ -45,6 +48,11 @@ const App: React.FC = () => {
   const [gasPrice, setGasPrice] = useState<string>('0');
   const [bootTime] = useState(new Date().toLocaleTimeString());
   
+  // Unified Map Sync State
+  const [isMapScanning, setIsMapScanning] = useState(false);
+  const [mapScanProgress, setMapScanProgress] = useState('IDLE');
+  const mapAbortController = useRef<AbortController | null>(null);
+
   const [user, setUser] = useState<UserContext>({
     address: null,
     isConnected: false,
@@ -54,7 +62,13 @@ const App: React.FC = () => {
     username: null,
     currentArea: null,
     yue: null,
-    qings: []
+    qings: [],
+    mapSync: {
+        isScanning: false,
+        progress: 'IDLE',
+        triggerSync: () => {},
+        stopSync: () => {}
+    }
   });
 
   const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -63,6 +77,144 @@ const App: React.FC = () => {
     const safeEntry = { ...entry, id: entry.id || generateId() };
     setLogs(prev => [...prev, safeEntry].slice(-100)); // Keep last 100
   };
+
+  // --- UNIFIED MAP SYNC LOGIC ---
+  const triggerMapSync = async () => {
+      if (isMapScanning) return;
+      if (!web3) {
+          addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: 'Sync Failed: No Network Connection' });
+          return;
+      }
+
+      setIsMapScanning(true);
+      setMapScanProgress('INITIALIZING...');
+      addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: 'Global Map Sync Initiated...' });
+
+      mapAbortController.current = new AbortController();
+      const signal = mapAbortController.current.signal;
+
+      try {
+          // Sync Loop
+          while (!signal.aborted) {
+              const currentBlock = await web3.getProvider().getBlockNumber();
+              const meta = await Persistence.getChannelMeta(ADDRESSES.MAP);
+              const ranges = meta?.scannedRanges || [];
+              ranges.sort((a,b) => a.start - b.start); 
+
+              let tipEnd = GENESIS_BLOCK;
+              if (ranges.length > 0) tipEnd = ranges[ranges.length - 1].end;
+              
+              // 1. Sync Tip
+              if (tipEnd < currentBlock) {
+                  const start = Math.max(tipEnd + 1, currentBlock - 500000); 
+                  const end = Math.min(start + CHUNK_SIZE, currentBlock);
+                  setMapScanProgress(`SYNCING TIP: ${start} -> ${end}`);
+                  await scanMapChunk(start, end, signal);
+                  await new Promise(r => setTimeout(r, 100));
+                  continue;
+              }
+
+              // 2. Fill Gaps
+              let foundGap = false;
+              for (let i = ranges.length - 1; i > 0; i--) {
+                  const current = ranges[i];
+                  const prev = ranges[i-1];
+                  if (current.start > prev.end + 1) {
+                      const gapEnd = current.start - 1;
+                      const gapStart = Math.max(prev.end + 1, gapEnd - CHUNK_SIZE);
+                      setMapScanProgress(`FILLING GAP: ${gapStart} -> ${gapEnd}`);
+                      await scanMapChunk(gapStart, gapEnd, signal);
+                      foundGap = true;
+                      break;
+                  }
+              }
+              if (foundGap) {
+                  await new Promise(r => setTimeout(r, 100));
+                  continue;
+              }
+
+              // 3. Backfill History
+              let earliest = GENESIS_BLOCK;
+              if (ranges.length > 0) earliest = ranges[0].start;
+              
+              if (earliest > GENESIS_BLOCK) {
+                  const end = earliest - 1;
+                  const start = Math.max(GENESIS_BLOCK, end - CHUNK_SIZE);
+                  setMapScanProgress(`BACKFILLING: ${start} -> ${end}`);
+                  await scanMapChunk(start, end, signal);
+                  await new Promise(r => setTimeout(r, 100));
+                  continue;
+              }
+
+              addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'SUCCESS', message: `Global Map Sync Complete.` });
+              break;
+          }
+      } catch (e: any) {
+          if (e.message !== "Aborted") {
+             console.error(e);
+             addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Map Sync Error: ${e.message}` });
+          }
+      } finally {
+          setIsMapScanning(false);
+          setMapScanProgress('IDLE');
+          mapAbortController.current = null;
+      }
+  };
+
+  const stopMapSync = () => {
+      if (mapAbortController.current) {
+          mapAbortController.current.abort();
+          addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: 'Map Sync Aborted by User.' });
+      }
+  };
+
+  const scanMapChunk = async (start: number, end: number, signal: AbortSignal) => {
+      if (!web3) return;
+      const map = web3.getContract(ADDRESSES.MAP, MAP_ABI);
+      const events = await map.queryFilter("NewQing", start, end);
+      
+      if (events.length > 0) {
+          await Promise.all(events.map(async (e: any) => {
+              const qingAddress = e.args[0];
+              const integrative = e.args[1];
+              const waat = e.args[2];
+              
+              // Only fetch name if we don't have it, or simple update
+              let name = "Unknown Sector";
+              let symbol = "UNK";
+              try {
+                  const qing = web3.getContract(qingAddress, QING_ABI);
+                  name = await qing.name();
+                  symbol = await qing.symbol();
+              } catch {}
+
+              const s: SectorData = {
+                  address: qingAddress,
+                  integrative,
+                  waat: waat.toString(),
+                  name,
+                  symbol,
+                  isSystem: false
+              };
+              // Persist (Merges, so Hecke preserved)
+              await Persistence.saveSector(s);
+          }));
+      }
+      await Persistence.updateScannedRange(ADDRESSES.MAP, start, end);
+  };
+
+  // Sync Context into User Object
+  useEffect(() => {
+      setUser(prev => ({
+          ...prev,
+          mapSync: {
+              isScanning: isMapScanning,
+              progress: mapScanProgress,
+              triggerSync: triggerMapSync,
+              stopSync: stopMapSync
+          }
+      }));
+  }, [isMapScanning, mapScanProgress, web3]); // web3 dep ensures triggerSync closes over current web3 instance
 
   useEffect(() => {
     // Load Settings on Boot
@@ -292,6 +444,7 @@ const App: React.FC = () => {
                   web3={web3}
                   addLog={addLog} 
                   onSelectSector={handleSelectSector}
+                  mapSync={user.mapSync}
               />;
           case AppView.VOID_CHAT:
               return <div className="h-full w-full max-w-4xl mx-auto p-6">

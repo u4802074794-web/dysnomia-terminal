@@ -167,9 +167,35 @@ class PersistenceService {
         const db = await this.init();
         return new Promise((resolve, reject) => {
             const tx = db.transaction('sectors', 'readwrite');
-            // Ensure address is lowercase
-            const safeSector = { ...sector, address: sector.address.toLowerCase() };
-            tx.objectStore('sectors').put(safeSector);
+            const store = tx.objectStore('sectors');
+            const addr = sector.address.toLowerCase();
+            
+            // Read existing to preserve Hecke data if present and not provided in update
+            const request = store.get(addr);
+            
+            request.onsuccess = () => {
+                const existing = request.result;
+                const merged = { 
+                    ...existing, // Keep existing fields (like hecke)
+                    ...sector,   // Overwrite with new fields
+                    address: addr // Ensure address is key
+                };
+                
+                // If the new update has explicitly null/undefined hecke, we keep existing. 
+                // If it HAS hecke, it overrides.
+                if (!sector.hecke && existing?.hecke) {
+                    merged.hecke = existing.hecke;
+                }
+
+                store.put(merged);
+            };
+            
+            request.onerror = () => {
+                // If read fails, just put (should rarely happen)
+                const safeSector = { ...sector, address: addr };
+                store.put(safeSector);
+            };
+
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });

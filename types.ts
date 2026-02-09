@@ -1,3 +1,4 @@
+
 import { Contract, InterfaceAbi } from "ethers";
 
 export enum AppView {
@@ -34,6 +35,13 @@ export interface UserContext {
       pole: string;
       soul: string;
       aura: string;
+  };
+  // Unified Map Sync State
+  mapSync: {
+      isScanning: boolean;
+      progress: string;
+      triggerSync: () => void;
+      stopSync: () => void;
   };
 }
 
