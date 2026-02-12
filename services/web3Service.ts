@@ -44,6 +44,10 @@ export class Web3Service {
     throw new Error("Cannot connect: No wallet found");
   }
 
+  hasSigner(): boolean {
+      return !!this.signer;
+  }
+
   async getBalance(address: string): Promise<string> {
     const balance = await this.provider.getBalance(address);
     return formatEther(balance);
@@ -64,7 +68,9 @@ export class Web3Service {
       const result = await contract[method].staticCall(...args);
       return { success: true, result };
     } catch (error: any) {
-      return { success: false, error: this.parseError(error) };
+      // Pass raw error data if available for decoding
+      const data = error?.data || error?.transaction?.data || error?.info?.error?.data;
+      return { success: false, error: this.parseError(error), rawData: data };
     }
   }
 
@@ -141,6 +147,9 @@ export class Web3Service {
       }
       if (error?.code === 'ACTION_REJECTED' || error?.code === 4001) {
           return "User Rejected Transaction.";
+      }
+      if (error?.code === 'UNSUPPORTED_OPERATION' && error?.operation === 'sendTransaction') {
+          return "Wallet Not Connected. Read-Only Mode.";
       }
 
       // 4. Return Full Message

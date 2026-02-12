@@ -61,3 +61,11 @@ export interface ChatMessage {
   blockNumber: number;
   isMe: boolean;
 }
+
+export interface ContractInteractionRequest {
+    contractName: string; // The name in the registry, or "CUSTOM"
+    address?: string; // Optional override or for instances
+    functionName?: string;
+    args?: any[];
+    description?: string;
+}

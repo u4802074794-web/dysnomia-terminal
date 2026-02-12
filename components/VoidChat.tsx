@@ -461,6 +461,13 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
         addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Pilot Identity Required.` });
         return;
     }
+    
+    // SAFETY CHECK: Ensure we are in write-mode (connected wallet)
+    if (!web3.hasSigner()) {
+        addLog({ id: Date.now().toString(), timestamp: new Date().toLocaleTimeString(), type: 'ERROR', message: `Transmission Failed: Wallet Connection Required (Read-Only Mode Active).` });
+        return;
+    }
+
     setIsLoading(true);
 
     try {

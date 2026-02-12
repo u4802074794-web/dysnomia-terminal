@@ -1,7 +1,8 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { formatUnits, ZeroAddress } from 'ethers';
 import { Web3Service } from './services/web3Service';
-import { AppView, LogEntry, UserContext } from './types';
+import { AppView, LogEntry, UserContext, ContractInteractionRequest } from './types';
 import { ADDRESSES, DEFAULT_RPC_URL, GEMINI_MODELS, MAP_ABI, QING_ABI } from './constants';
 import { Persistence, SectorData } from './services/persistenceService';
 
@@ -43,6 +44,9 @@ const App: React.FC = () => {
   // Registry Navigation State
   const [registrySearch, setRegistrySearch] = useState('');
 
+  // Contract Studio Interaction State (Deep Linking)
+  const [pendingInteraction, setPendingInteraction] = useState<ContractInteractionRequest | null>(null);
+
   // Telemetry
   const [blockNumber, setBlockNumber] = useState<number>(0);
   const [gasPrice, setGasPrice] = useState<string>('0');
@@ -63,6 +67,7 @@ const App: React.FC = () => {
     currentArea: null,
     yue: null,
     qings: [],
+    saat: undefined,
     mapSync: {
         isScanning: false,
         progress: 'IDLE',
@@ -214,7 +219,7 @@ const App: React.FC = () => {
               stopSync: stopMapSync
           }
       }));
-  }, [isMapScanning, mapScanProgress, web3]); // web3 dep ensures triggerSync closes over current web3 instance
+  }, [isMapScanning, mapScanProgress, web3]); 
 
   useEffect(() => {
     // Load Settings on Boot
@@ -281,6 +286,18 @@ const App: React.FC = () => {
       sessionStorage.setItem('dys_selected_sector', address);
       setView(AppView.QING);
       addLog({ id: generateId(), timestamp: new Date().toLocaleTimeString(), type: 'INFO', message: `NAV Vector Set: ${address}` });
+  };
+
+  // Handle AI Direct Navigation (Deep Links)
+  const handleAiDeepLink = (req: ContractInteractionRequest) => {
+      setPendingInteraction(req);
+      setView(AppView.CONTRACT_STUDIO);
+      addLog({ 
+          id: generateId(), 
+          timestamp: new Date().toLocaleTimeString(), 
+          type: 'INFO', 
+          message: `AI Navigation: Opening ${req.contractName} Studio...` 
+      });
   };
 
   // Polling for block stats
@@ -458,7 +475,12 @@ const App: React.FC = () => {
                 />
               </div>;
           case AppView.CONTRACT_STUDIO:
-              return <ContractStudio web3={web3} addLog={addLog} />;
+              return <ContractStudio 
+                  web3={web3} 
+                  addLog={addLog} 
+                  initialState={pendingInteraction} 
+                  onClearState={() => setPendingInteraction(null)}
+              />;
           default:
               return <div className="p-10 text-center font-mono text-dys-red">ERR: MODULE NOT FOUND</div>;
       }
@@ -611,7 +633,13 @@ const App: React.FC = () => {
           {/* Right Sidebar: AI (Overlay style) */}
           {showNavAI && (
               <aside className="w-80 md:w-96 border-l-2 border-dys-amber/20 z-40 bg-[#050505]">
-                  <NavAI userContext={user} addLog={addLog} currentView={view} />
+                  <NavAI 
+                    userContext={user} 
+                    addLog={addLog} 
+                    currentView={view} 
+                    onNavigateToContract={handleAiDeepLink}
+                    activeModel={aiModel}
+                  />
               </aside>
           )}
 
