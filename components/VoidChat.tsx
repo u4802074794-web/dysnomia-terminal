@@ -19,13 +19,15 @@ interface VoidChatProps {
   onViewIdentity?: (soulId: string) => void;
 }
 
+// ABI for Shio LogEvent (Used by Void and System Contracts)
+// Note: Events in Shio might not be indexed, so we use a broad signature matching
 const SHIO_LOG_ABI = ["event LogEvent(uint64 Soul, uint64 Aura, string LogLine)"];
 const QING_LOG_ABI = ["event LogEvent(string Username, uint64 Soul, uint64 Aura, string LogLine)"];
 
 const POLL_INTERVAL = 10000; 
 const GENESIS_BLOCK = 22813947; 
-const INITIAL_SCAN_DEPTH = 7200; 
-const FETCH_CHUNK_SIZE = 5000;
+const INITIAL_SCAN_DEPTH = 50000; 
+const FETCH_CHUNK_SIZE = 50000; // Increased chunk size to 50k per user request
 
 interface ChatSegment {
     type: 'RANGE' | 'GAP';
@@ -110,12 +112,17 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
   const isVoid = viewAddress.toLowerCase() === ADDRESSES.VOID.toLowerCase();
 
   const getLogConfig = useCallback(() => {
-    const logSourceAddress = isVoid ? ADDRESSES.CHATLOG_SHIO : viewAddress;
+    // Determine source contract and ABI
+    // const logSourceAddress = isVoid ? ADDRESSES.CHATLOG_SHIO : viewAddress; // This line was wrong, we shouldn't be using the CHATLOG_SHIO address
+    const logSourceAddress = isVoid ? undefined : viewAddress;
     const logEventAbi = isVoid ? SHIO_LOG_ABI : QING_LOG_ABI;
     const logInterface = new Interface(logEventAbi);
+    
+    // Topic signatures differ between Void (Shio) and Qing (Venue)
     const topicSignature = isVoid 
             ? "LogEvent(uint64,uint64,string)"
             : "LogEvent(string,uint64,uint64,string)";
+            
     return { logSourceAddress, logInterface, topicHash: id(topicSignature) };
   }, [isVoid, viewAddress]);
 
@@ -306,7 +313,7 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
               cursor = hitRange.start - 1; 
               break; 
           }
-          const chunkStart = Math.max(targetStart, cursor - 2000); 
+          const chunkStart = Math.max(targetStart, cursor - 10000); 
           await fetchChunk(chunkStart, cursor);
           await rebuildSegments();
           cursor = chunkStart - 1;
@@ -344,10 +351,14 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                
                let soulId, content, username;
                if (isVoid) {
+                   // VOID LOG FORMAT: (uint64 Soul, uint64 Aura, string LogLine)
+                   // Not indexed, so they are in args
                    soulId = parsed.args[0].toString();
-                   content = parsed.args[2];
+                   // Defensive check for LogLine index
+                   content = parsed.args.length > 2 ? parsed.args[2] : "DATA_ERROR";
                    username = `Soul #${soulId}`;
                } else {
+                   // QING LOG FORMAT: (string Username, uint64 Soul, uint64 Aura, string LogLine)
                    username = parsed.args[0];
                    soulId = parsed.args[1].toString();
                    content = parsed.args[3];
@@ -362,7 +373,10 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                 blockNumber: log.blockNumber,
                 isMe: false 
               };
-           } catch(e) { return null; }
+           } catch(e) { 
+               console.warn("Log Parse Error", e);
+               return null; 
+           }
         }).filter((m): m is ChatMessage => m !== null);
 
         if (newMsgs.length > 0) {
@@ -561,7 +575,7 @@ const VoidChat: React.FC<VoidChatProps> = ({ web3, viewAddress, lauArea, lauAddr
                                 disabled={!!fetchingGap}
                                 className="text-[10px] border border-dys-cyan/30 text-dys-cyan px-3 py-1 hover:bg-dys-cyan hover:text-black transition-colors disabled:opacity-30"
                             >
-                                SCAN CHUNK (5K)
+                                SCAN CHUNK ({FETCH_CHUNK_SIZE}K)
                             </button>
                             <button 
                                 onClick={() => handleFillGap(seg.start, seg.end, 'FULL')}

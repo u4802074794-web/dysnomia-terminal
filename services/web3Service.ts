@@ -105,7 +105,20 @@ export class Web3Service {
   }
   
   async waitForReceipt(tx: TransactionResponse): Promise<TransactionReceipt | null> {
-      return await tx.wait();
+      try {
+          // Ethers v6 tx.wait handles replacements (speed ups) automatically
+          return await tx.wait();
+      } catch (error: any) {
+          if (error.code === 'TRANSACTION_REPLACED') {
+              // The transaction was replaced (speed up or cancel)
+              // Return the receipt of the replacement transaction
+              if (error.receipt) {
+                  return error.receipt;
+              }
+          }
+          // Re-throw other errors (reverts, network issues)
+          throw error;
+      }
   }
 
   getProvider() {
@@ -150,6 +163,9 @@ export class Web3Service {
       }
       if (error?.code === 'UNSUPPORTED_OPERATION' && error?.operation === 'sendTransaction') {
           return "Wallet Not Connected. Read-Only Mode.";
+      }
+      if (error?.code === 'TRANSACTION_REPLACED') {
+          return "Transaction Replaced (Speed Up/Cancel).";
       }
 
       // 4. Return Full Message

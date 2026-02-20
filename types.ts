@@ -2,15 +2,16 @@
 import { Contract, InterfaceAbi } from "ethers";
 
 export enum AppView {
-  DASHBOARD = 'DASHBOARD',
-  LAU = 'LAU_IDENTITY',
+  COMMAND_DECK = 'COMMAND_DECK', // Merged Dashboard + Identity
+  NAVIGATION = 'NAVIGATION', // QingMap
+  COMMS = 'COMMS', // VoidChat + Channels
+  OPERATIONS = 'OPERATIONS', // Game Loop (Cheon/War/World)
+  MARKET = 'MARKET', // Exchange
   LAU_REGISTRY = 'LAU_REGISTRY',
-  YUE = 'YUE_BRIDGE',
-  QING = 'QING_NAV',
-  MAP = 'MAP',
-  VOID_CHAT = 'VOID_CHAT',
   CONTRACT_STUDIO = 'CONTRACT_STUDIO',
-  SETTINGS = 'SETTINGS'
+  SETTINGS = 'SETTINGS',
+  QING = 'QING',
+  DATA_IO = 'DATA_IO'
 }
 
 export interface LogEntry {
@@ -40,6 +41,7 @@ export interface UserContext {
   mapSync: {
       isScanning: boolean;
       progress: string;
+      lastUpdate: number; // Timestamp of last successful chunk scan
       triggerSync: () => void;
       stopSync: () => void;
   };
@@ -68,4 +70,14 @@ export interface ContractInteractionRequest {
     functionName?: string;
     args?: any[];
     description?: string;
+}
+
+export interface PowerTokenData {
+    name: string;
+    symbol: string;
+    address: string;
+    balanceWallet: string;
+    balanceLau: string;
+    balanceYue: string;
+    strategicTarget: 'LAU' | 'YUE' | 'ANY'; // Where it "should" be
 }
